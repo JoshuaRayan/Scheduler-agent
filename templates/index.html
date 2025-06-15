@@ -1,0 +1,1122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Scheduler AI Agent</title>
+    <style>
+        /* Reset and basic styles */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html, body {
+            height: 100%;
+            width: 100%;
+            overflow: hidden; /* Prevent overall page scrolling */
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #333;
+            display: flex; /* To center the main container */
+            align-items: center;
+            justify-content: center;
+            padding: 20px; /* Add some padding around the main container */
+        }
+
+        .container {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.1);
+            width: 90%;
+            max-width: 1200px;
+            height: 100%; /* Take full height of the body's flex item */
+            display: flex; /* Use flex for main sections (chat + sidebar) */
+            flex-direction: row;
+            overflow: hidden; /* Crucial for containing internal scrolling elements */
+        }
+
+        .chat-section {
+            display: flex;
+            flex-direction: column;
+            flex: 2; /* Takes 2/3 of the space */
+            height: 100%; /* Take full height of the container's flex item */
+            overflow: hidden; /* Important for containing chat-container's scroll */
+            position: relative; /* For positioning scroll-to-bottom button */
+        }
+
+        .header {
+            background: linear-gradient(90deg, #4f46e5, #7c3aed);
+            color: white;
+            padding: 20px;
+            text-align: center;
+            flex-shrink: 0; /* Prevent header from shrinking */
+        }
+
+        .header h1 {
+            font-size: 24px;
+            margin-bottom: 5px;
+        }
+
+        .header p {
+            opacity: 0.9;
+            font-size: 14px;
+        }
+
+        .chat-container {
+            flex: 1; /* Takes all available space between header and input */
+            padding: 20px;
+            overflow-y: auto; /* Enable scrolling for messages */
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            scroll-behavior: smooth;
+            /* position: relative; removed as it's now on .chat-section */
+        }
+
+        .input-section {
+            padding: 20px;
+            border-top: 1px solid #e5e7eb;
+            background: white;
+            flex-shrink: 0; /* Prevent input section from shrinking */
+        }
+
+        .input-container {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .input-field {
+            flex: 1;
+            padding: 12px 16px;
+            border: 2px solid #e5e7eb;
+            border-radius: 25px;
+            font-size: 16px;
+            outline: none;
+            transition: border-color 0.3s;
+        }
+
+        .input-field:focus {
+            border-color: #4f46e5;
+        }
+
+        .voice-btn, .send-btn {
+            width: 45px;
+            height: 45px;
+            border: none;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-size: 18px;
+            background: linear-gradient(45deg, #4f46e5, #7c3aed);
+            color: white;
+        }
+
+        .voice-btn:hover, .send-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(79, 70, 229, 0.2);
+        }
+
+        .voice-btn:active, .send-btn:active {
+            transform: translateY(0);
+        }
+
+        .message {
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            animation: fadeIn 0.3s ease-in;
+        }
+
+        .message.user {
+            flex-direction: row-reverse;
+        }
+
+        .message-avatar {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            color: white;
+        }
+
+        .message.bot .message-avatar {
+            background: linear-gradient(45deg, #4f46e5, #7c3aed);
+        }
+
+        .message.user .message-avatar {
+            background: linear-gradient(45deg, #10b981, #059669);
+        }
+
+        .message-content {
+            background: #f8fafc;
+            padding: 12px 16px;
+            border-radius: 18px;
+            max-width: 70%;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            word-wrap: break-word; /* Ensure long words wrap */
+            overflow-wrap: break-word; /* For more aggressive word breaking */
+        }
+
+        .message.user .message-content {
+            background: linear-gradient(45deg, #10b981, #059669);
+            color: white;
+        }
+
+        .slot-buttons {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            margin-top: 10px;
+        }
+
+        .slot-button {
+            background: linear-gradient(45deg, #4f46e5, #7c3aed);
+            color: white;
+            border: none;
+            padding: 12px 20px;
+            border-radius: 12px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.3s ease;
+            text-align: left;
+            width: 100%;
+        }
+
+        .slot-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(79, 70, 229, 0.2);
+        }
+
+        .slot-button:active {
+            transform: translateY(0);
+        }
+
+        .thinking {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: #6b7280;
+        }
+
+        .thinking::after {
+            content: '...';
+            animation: thinking 1.5s infinite;
+        }
+
+        @keyframes thinking {
+            0% { content: '.'; }
+            33% { content: '..'; }
+            66% { content: '...'; }
+        }
+
+        .scroll-to-bottom {
+            position: absolute; /* Position relative to .chat-section */
+            bottom: 80px; /* Space from input area */
+            right: 20px;
+            background: linear-gradient(45deg, #4f46e5, #7c3aed);
+            color: white;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+            opacity: 0;
+            transition: opacity 0.3s, transform 0.3s;
+            transform: translateY(20px);
+            z-index: 1000;
+        }
+
+        .scroll-to-bottom.visible {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        .scroll-to-bottom:hover {
+            transform: translateY(-2px);
+        }
+
+        /* Sidebar styles */
+        .calendar-sidebar {
+            flex: 1; /* Takes 1/3 of the space */
+            background: #f8fafc;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            overflow-y: auto; /* Enable scrolling for sidebar content */
+            border-left: 1px solid #e5e7eb; /* Separator line */
+        }
+
+        .sidebar-section {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.05);
+            padding: 15px;
+            flex-shrink: 0; /* Prevent sections from shrinking if content is small */
+        }
+
+        .sidebar-section h2 {
+            font-size: 18px;
+            color: #4f46e5;
+            margin-bottom: 15px;
+            border-bottom: 1px solid #e5e7eb;
+            padding-bottom: 10px;
+        }
+
+        .context-item {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            font-size: 14px;
+        }
+
+        .context-label {
+            font-weight: bold;
+            color: #6b7280;
+        }
+
+        .context-value {
+            color: #333;
+        }
+
+        .quick-actions-grid {
+            display: grid;
+            grid-template-columns: 1fr; /* Single column for actions */
+            gap: 10px;
+        }
+
+        .quick-action-button {
+            background: #e0e7ff; /* Light blue */
+            color: #4f46e5;
+            border: none;
+            padding: 12px 15px;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: background 0.3s, transform 0.2s;
+            text-align: center;
+        }
+
+        .quick-action-button:hover {
+            background: #c7d2fe; /* Slightly darker blue on hover */
+            transform: translateY(-2px);
+        }
+
+        .quick-action-button:active {
+            transform: translateY(0);
+        }
+        
+        .connection-status {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            padding: 5px 10px;
+            border-radius: 15px;
+            font-size: 12px;
+            font-weight: bold;
+        }
+
+        .connection-status.connected {
+            background: #dcfce7;
+            color: #166534;
+        }
+
+        .connection-status.disconnected {
+            background: #fef2f2;
+            color: #dc2626;
+        }
+
+        /* Responsive adjustments */
+        @media (max-width: 768px) {
+            .container {
+                flex-direction: column; /* Stack columns on small screens */
+                height: 100%; /* Use full height on small screens */
+                border-radius: 0; /* No rounded corners on full screen */
+            }
+            
+            .chat-section {
+                flex: 1; /* Chat takes full height when stacked */
+                width: 100%;
+            }
+
+            .calendar-sidebar {
+                display: none; /* Hide sidebar on small screens for chat focus */
+            }
+        }
+
+        /* Add some spacing at the bottom of the chat container to prevent last message being hidden by input field */
+        .chat-container::after {
+            content: '';
+            display: block;
+            height: 20px; /* Adjust as needed */
+        }
+
+        /* Add a scrollbar style for better aesthetics */
+        .chat-container::-webkit-scrollbar,
+        .calendar-sidebar::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .chat-container::-webkit-scrollbar-track,
+        .calendar-sidebar::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 4px;
+        }
+
+        .chat-container::-webkit-scrollbar-thumb,
+        .calendar-sidebar::-webkit-scrollbar-thumb {
+            background: #888;
+            border-radius: 4px;
+        }
+
+        .chat-container::-webkit-scrollbar-thumb:hover,
+        .calendar-sidebar::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
+
+        .tab-container {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+
+        .tab {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            background: #e5e7eb;
+            color: #4b5563;
+            transition: all 0.3s;
+        }
+
+        .tab.active {
+            background: #4f46e5;
+            color: white;
+        }
+
+        .calendar-view {
+            display: none;
+        }
+
+        .calendar-view.active {
+            display: block;
+        }
+
+        .meeting-list {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .meeting-item {
+            background: white;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 12px;
+        }
+
+        .meeting-time {
+            font-weight: bold;
+            color: #4f46e5;
+            margin-bottom: 4px;
+        }
+
+        .meeting-title {
+            font-size: 14px;
+            color: #1f2937;
+        }
+
+        .meeting-duration {
+            font-size: 12px;
+            color: #6b7280;
+            margin-top: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="chat-section">
+            <div class="header">
+                <div class="connection-status disconnected" id="connectionStatus">
+                    Disconnected
+                </div>
+                <h1>Smart Scheduler AI</h1>
+                <p>Your intelligent meeting scheduling assistant</p>
+            </div>
+            
+            <div class="chat-container" id="chatContainer">
+                <div class="message bot">
+                    <div class="message-avatar">🤖</div>
+                    <div class="message-content">
+                        Hi! I'm your Smart Scheduler AI. I can help you find and schedule meetings by checking your calendar availability. Just tell me what you need - you can type or use voice! 
+                        <br><br>
+                        Try saying something like: "I need to schedule a 1-hour meeting for tomorrow afternoon"
+                    </div>
+                </div>
+            </div>
+            
+            <button class="scroll-to-bottom" id="scrollToBottom" title="Scroll to bottom">↓</button>
+            
+            <div class="input-section">
+                <div class="input-container">
+                    <button class="voice-btn" id="voiceBtn" title="Click and hold to record">🎤</button>
+                    <input type="text" class="input-field" id="messageInput" placeholder="Type your message or hold the mic button to speak...">
+                    <button class="send-btn" id="sendBtn" title="Send message">📤</button>
+                </div>
+            </div>
+        </div>
+        
+        <div class="calendar-sidebar">
+            <div class="sidebar-section">
+                <div class="tab-container">
+                    <button class="tab active" onclick="scheduler.switchTab('context')">Context</button>
+                    <button class="tab" onclick="scheduler.switchTab('calendar')">Today's Meetings</button>
+                </div>
+                
+                <div id="contextView" class="calendar-view active">
+                    <h2>Meeting Context</h2>
+                    <div class="context-item">
+                        <span class="context-label">Duration:</span>
+                        <span class="context-value" id="durationStatus">Not set</span>
+                    </div>
+                    <div class="context-item">
+                        <span class="context-label">Preferred Time:</span>
+                        <span class="context-value" id="timeStatus">Not set</span>
+                    </div>
+                    <div class="context-item">
+                        <span class="context-label">Status:</span>
+                        <span class="context-value" id="schedulingStatus">Ready</span>
+                    </div>
+                </div>
+                
+                <div id="calendarView" class="calendar-view">
+                    <h2>Today's Meetings</h2>
+                    <div id="meetingsList" class="meeting-list">
+                        <!-- Meetings will be listed here -->
+                    </div>
+                </div>
+            </div>
+
+            <div class="sidebar-section">
+                <h2>Quick Actions</h2>
+                <div class="quick-actions-grid">
+                    <button class="quick-action-button" onclick="quickAction('30min tomorrow')">30 min tomorrow</button>
+                    <button class="quick-action-button" onclick="quickAction('1hr this afternoon')">1 hr this afternoon</button>
+                    <button class="quick-action-button" onclick="quickAction('2hr next week')">2 hr next week</button>
+                    <button class="quick-action-button" onclick="quickAction('15min ASAP')">15 min ASAP</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        class SmartScheduler {
+            constructor() {
+                this.isRecording = false;
+                this.mediaRecorder = null;
+                this.audioChunks = [];
+                this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+
+                this.conversationContext = {
+                    duration: null,
+                    preferredTime: null,
+                    meetingTitle: null,
+                    attendees: [],
+                    currentStep: 'initial'
+                };
+                
+                this.initializeElements();
+                this.initializeEventListeners();
+                this.initializeScrollToBottom();
+                this.simulateConnection();
+                this.loadTodayMeetings();
+            }
+            
+            initializeElements() {
+                this.chatContainer = document.getElementById('chatContainer');
+                this.messageInput = document.getElementById('messageInput');
+                this.voiceBtn = document.getElementById('voiceBtn');
+                this.sendBtn = document.getElementById('sendBtn');
+                this.scrollToBottomBtn = document.getElementById('scrollToBottom');
+                this.connectionStatus = document.getElementById('connectionStatus');
+                this.durationStatus = document.getElementById('durationStatus');
+                this.timeStatus = document.getElementById('timeStatus');
+                this.schedulingStatus = document.getElementById('schedulingStatus');
+            }
+            
+            async initializeEventListeners() {
+                this.sendBtn.addEventListener('click', () => this.sendMessage());
+                
+                this.messageInput.addEventListener('keypress', (e) => {
+                    if (e.key === 'Enter') {
+                        this.sendMessage();
+                    }
+                });
+                
+                // Initialize media recorder
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ 
+                        audio: {
+                            channelCount: 1,
+                            sampleRate: 16000,
+                            sampleSize: 16,
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            autoGainControl: true
+                        }
+                    });
+                    
+                    this.mediaRecorder = new MediaRecorder(stream, {
+                        mimeType: 'audio/webm;codecs=opus',
+                        audioBitsPerSecond: 16000
+                    });
+                    
+                    this.mediaRecorder.ondataavailable = (event) => {
+                        if (event.data.size > 0) {
+                            this.audioChunks.push(event.data);
+                        }
+                    };
+                    
+                    this.mediaRecorder.onstop = async () => {
+                        const audioBlob = new Blob(this.audioChunks, { type: 'audio/webm' });
+                        this.audioChunks = [];
+                        
+                        try {
+                            // Convert to WAV format
+                            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                            const arrayBuffer = await audioBlob.arrayBuffer();
+                            const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+                            
+                            // Create offline context for resampling
+                            const offlineContext = new OfflineAudioContext(1, audioBuffer.duration * 16000, 16000);
+                            const source = offlineContext.createBufferSource();
+                            source.buffer = audioBuffer;
+                            source.connect(offlineContext.destination);
+                            source.start();
+                            
+                            // Render at 16kHz
+                            const renderedBuffer = await offlineContext.startRendering();
+                            
+                            // Convert to 16-bit PCM
+                            const pcmData = this._convertToPCM(renderedBuffer);
+                            
+                            // Create WAV file
+                            const wavBlob = this._createWavFile(pcmData, 16000);
+                            
+                            // Send audio to server for recognition
+                            const formData = new FormData();
+                            formData.append('audio', wavBlob, 'recording.wav');
+                            
+                            // Add loading state
+                            this.voiceBtn.textContent = '⌛';
+                            this.voiceBtn.disabled = true;
+                            
+                            const response = await fetch('/api/speech/recognize', {
+                                method: 'POST',
+                                body: formData
+                            });
+                            
+                            // Reset button state
+                            this.voiceBtn.textContent = '🎤';
+                            this.voiceBtn.disabled = false;
+                            
+                            if (!response.ok) {
+                                const errorData = await response.json();
+                                throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
+                            }
+                            
+                            const data = await response.json();
+                            
+                            if (data.success) {
+                                // Add the recognized text to chat
+                                this.addMessage(data.text, true);
+                                
+                                // Process the response
+                                if (data.response) {
+                                    this.addMessage(data.response.response);
+                                    this.conversationContext = data.response.context;
+                                    this.updateContext();
+                                    
+                                    if (data.response.has_slots && data.response.available_slots) {
+                                        this.addSlotSelectionButtons();
+                                    }
+                                }
+                            } else {
+                                console.error('Speech recognition failed:', data.error);
+                                this.addMessage("Sorry, I couldn't understand that. Could you please try again?", false);
+                            }
+                        } catch (error) {
+                            console.error('Error sending audio:', error);
+                            this.voiceBtn.textContent = '🎤';
+                            this.voiceBtn.disabled = false;
+                            this.addMessage("Sorry, there was an error processing your speech. Please try again.", false);
+                        }
+                    };
+                } catch (error) {
+                    console.error('Error accessing microphone:', error);
+                    this.voiceBtn.style.display = 'none';
+                }
+                
+                this.voiceBtn.addEventListener('mousedown', () => this.startRecording());
+                this.voiceBtn.addEventListener('mouseup', () => this.stopRecording());
+                this.voiceBtn.addEventListener('mouseleave', () => this.stopRecording());
+                
+                // Touch events for mobile
+                this.voiceBtn.addEventListener('touchstart', (e) => {
+                    e.preventDefault();
+                    this.startRecording();
+                });
+                this.voiceBtn.addEventListener('touchend', (e) => {
+                    e.preventDefault();
+                    this.stopRecording();
+                });
+            }
+            
+            _convertToPCM(audioBuffer) {
+                const numChannels = 1;
+                const sampleRate = 16000;
+                const format = 1; // PCM
+                const bitDepth = 16;
+                
+                const numSamples = audioBuffer.length * numChannels;
+                const buffer = new ArrayBuffer(44 + numSamples * 2);
+                const view = new DataView(buffer);
+                
+                // Write WAV header
+                this._writeString(view, 0, 'RIFF');
+                view.setUint32(4, 36 + numSamples * 2, true);
+                this._writeString(view, 8, 'WAVE');
+                this._writeString(view, 12, 'fmt ');
+                view.setUint32(16, 16, true);
+                view.setUint16(20, format, true);
+                view.setUint16(22, numChannels, true);
+                view.setUint32(24, sampleRate, true);
+                view.setUint32(28, sampleRate * 2, true);
+                view.setUint16(32, numChannels * 2, true);
+                view.setUint16(34, bitDepth, true);
+                this._writeString(view, 36, 'data');
+                view.setUint32(40, numSamples * 2, true);
+                
+                // Write PCM data
+                const channelData = audioBuffer.getChannelData(0);
+                let offset = 44;
+                for (let i = 0; i < channelData.length; i++) {
+                    const sample = Math.max(-1, Math.min(1, channelData[i]));
+                    view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
+                    offset += 2;
+                }
+                
+                return buffer;
+            }
+            
+            _writeString(view, offset, string) {
+                for (let i = 0; i < string.length; i++) {
+                    view.setUint8(offset + i, string.charCodeAt(i));
+                }
+            }
+            
+            _createWavFile(pcmData, sampleRate) {
+                return new Blob([pcmData], { type: 'audio/wav' });
+            }
+            
+            simulateConnection() {
+                setTimeout(() => {
+                    this.connectionStatus.textContent = 'Connected';
+                    this.connectionStatus.className = 'connection-status connected';
+                }, 1000);
+            }
+            
+            startRecording() {
+                if (this.mediaRecorder && !this.isRecording) {
+                    this.audioChunks = [];
+                    this.mediaRecorder.start();
+                    this.isRecording = true;
+                    this.voiceBtn.classList.add('recording');
+                    this.voiceBtn.textContent = '🎤 Recording...';
+                }
+            }
+            
+            stopRecording() {
+                if (this.mediaRecorder && this.isRecording) {
+                    this.mediaRecorder.stop();
+                    this.isRecording = false;
+                    this.voiceBtn.classList.remove('recording');
+                    this.voiceBtn.textContent = '🎤';
+                }
+            }
+            
+            async addMessage(content, isUser = false) {
+                console.log('Adding message:', { content, isUser });
+                const messageDiv = document.createElement('div');
+                messageDiv.className = `message ${isUser ? 'user' : 'bot'}`;
+                
+                messageDiv.innerHTML = `
+                    <div class="message-avatar">${isUser ? '👤' : '🤖'}</div>
+                    <div class="message-content">${content}</div>
+                `;
+                
+                this.chatContainer.appendChild(messageDiv);
+                this.chatContainer.scrollTop = this.chatContainer.scrollHeight;
+                
+                // Speak bot messages
+                if (!isUser) {
+                    this.speakText(content);
+                }
+            }
+            
+            addThinkingMessage() {
+                const thinkingDiv = document.createElement('div');
+                thinkingDiv.className = 'message bot';
+                thinkingDiv.id = 'thinking-message';
+                
+                thinkingDiv.innerHTML = `
+                    <div class="message-avatar">🤖</div>
+                    <div class="message-content">
+                        <div class="thinking">Thinking</div>
+                    </div>
+                `;
+                
+                this.chatContainer.appendChild(thinkingDiv);
+                
+                // Scroll to bottom with smooth animation
+                this.chatContainer.scrollTo({
+                    top: this.chatContainer.scrollHeight,
+                    behavior: 'smooth'
+                });
+            }
+            
+            removeThinkingMessage() {
+                const thinkingMsg = document.getElementById('thinking-message');
+                if (thinkingMsg) {
+                    thinkingMsg.remove();
+                }
+            }
+            
+            async speakText(text) {
+                const cleanText = text.replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ');
+                if (!cleanText) return; // Don't speak empty text
+
+                try {
+                    const response = await fetch('/api/text-to-speech', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({ text: cleanText })
+                    });
+
+                    const data = await response.json();
+
+                    if (data.success && data.audio) {
+                        // Convert base64 to blob
+                        const audioBytes = Uint8Array.from(atob(data.audio), c => c.charCodeAt(0));
+                        const audioBlob = new Blob([audioBytes.buffer], { type: 'audio/mpeg' });
+                        const audioUrl = URL.createObjectURL(audioBlob);
+                        
+                        // Create and play audio
+                        const audio = new Audio(audioUrl);
+                        audio.onended = () => {
+                            URL.revokeObjectURL(audioUrl); // Clean up the URL
+                        };
+                        await audio.play();
+                    } else {
+                        console.error("Failed to get audio from Eleven Labs:", data.error || "Unknown error");
+                    }
+                } catch (error) {
+                    console.error('Error calling text-to-speech API:', error);
+                }
+            }
+            
+            async sendMessage(message = this.messageInput.value.trim()) {
+                if (!message) return;
+                
+                // Add user message to chat immediately
+                this.addMessage(message, true);
+                
+                // Clear input field
+                this.messageInput.value = '';
+                
+                // Add thinking message
+                this.addThinkingMessage();
+                
+                try {
+                    const response = await fetch('/api/chat', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({ message })
+                    });
+                    
+                    const data = await response.json();
+                    console.log('API Response data:', data); // Log the full response
+                    this.removeThinkingMessage();
+                    
+                    if (data.success) {
+                        this.addMessage(data.response);
+                        this.conversationContext = data.context;
+                        this.updateContext();
+                        
+                        console.log('data.has_slots:', data.has_slots); // Log has_slots
+                        console.log('conversationContext.available_slots:', this.conversationContext.available_slots); // Log available_slots from context
+
+                        if (data.has_slots && this.conversationContext.available_slots && this.conversationContext.available_slots.length > 0) {
+                            this.addSlotSelectionButtons();
+                        }
+                    } else {
+                        this.addMessage(data.error || "I'm sorry, I encountered an error. Please try again.", false);
+                    }
+                } catch (error) {
+                    console.error('Error:', error);
+                    this.removeThinkingMessage();
+                    this.addMessage("I'm sorry, I couldn't connect to the server. Please try again.", false);
+                }
+            }
+            
+            addSlotSelectionButtons() {
+                const slotsDiv = document.createElement('div');
+                slotsDiv.className = 'message bot';
+                
+                const slots = this.conversationContext.available_slots.map((slot, index) => {
+                    const startTime = new Date(slot.start);
+                    const endTime = new Date(slot.end);
+                    
+                    const formattedStartTime = startTime.toLocaleString('en-IN', {
+                        timeZone: 'Asia/Kolkata',
+                        weekday: 'long',
+                        month: 'long',
+                        day: 'numeric',
+                        hour: 'numeric',
+                        minute: 'numeric',
+                        hour12: true
+                    });
+                    
+                    const formattedEndTime = endTime.toLocaleString('en-IN', {
+                        timeZone: 'Asia/Kolkata',
+                        hour: 'numeric',
+                        minute: 'numeric',
+                        hour12: true
+                    });
+                    
+                    return `
+                        <button class="slot-button" data-slot="${index}">
+                            ${formattedStartTime} - ${formattedEndTime} IST
+                        </button>
+                    `;
+                }).join('');
+                
+                slotsDiv.innerHTML = `
+                    <div class="message-avatar">🤖</div>
+                    <div class="message-content">
+                        <div class="slot-buttons">
+                            ${slots}
+                        </div>
+                    </div>
+                `;
+                
+                this.chatContainer.appendChild(slotsDiv);
+                
+                slotsDiv.querySelectorAll('.slot-button').forEach(button => {
+                    button.addEventListener('click', async () => {
+                        const slotIndex = parseInt(button.dataset.slot);
+                        await this.bookSlot(slotIndex);
+                    });
+                });
+                
+                this.chatContainer.scrollTo({
+                    top: this.chatContainer.scrollHeight,
+                    behavior: 'smooth'
+                });
+            }
+            
+            async bookSlot(slotIndex) {
+                this.addThinkingMessage();
+                
+                try {
+                    const response = await fetch('/api/book', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            slot_index: slotIndex,
+                            title: this.conversationContext.title || 'Meeting',
+                            attendees: this.conversationContext.attendees || []
+                        })
+                    });
+                    
+                    const data = await response.json();
+                    this.removeThinkingMessage();
+                    
+                    if (data.success) {
+                        this.addMessage(data.message);
+                        await this.resetConversation();
+                    } else {
+                        this.addMessage(data.error || "I'm sorry, I couldn't book that slot. Please try again.", false);
+                    }
+                } catch (error) {
+                    console.error('Error:', error);
+                    this.removeThinkingMessage();
+                    this.addMessage("I'm sorry, I couldn't connect to the server. Please try again.", false);
+                }
+            }
+            
+            async resetConversation() {
+                try {
+                    const response = await fetch('/api/reset', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        }
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (data.success) {
+                        this.conversationContext = {
+                            duration: null,
+                            preferredTime: null,
+                            meetingTitle: null,
+                            attendees: [],
+                            currentStep: 'initial'
+                        };
+                        this.updateContext();
+                    }
+                } catch (error) {
+                    console.error('Error:', error);
+                }
+            }
+            
+            initializeScrollToBottom() {
+                this.chatContainer.addEventListener('scroll', () => {
+                    const isNearBottom = this.chatContainer.scrollHeight - this.chatContainer.scrollTop - this.chatContainer.clientHeight < 100;
+                    this.scrollToBottomBtn.classList.toggle('visible', !isNearBottom);
+                });
+                
+                this.scrollToBottomBtn.addEventListener('click', () => {
+                    this.chatContainer.scrollTo({
+                        top: this.chatContainer.scrollHeight,
+                        behavior: 'smooth'
+                    });
+                });
+            }
+            
+            updateContext() {
+                if (this.conversationContext.duration) {
+                    this.durationStatus.textContent = this.conversationContext.duration;
+                }
+                if (this.conversationContext.preferred_time) {
+                    this.timeStatus.textContent = this.conversationContext.preferred_time;
+                }
+                if (this.conversationContext.available_slots && this.conversationContext.available_slots.length > 0) {
+                    this.schedulingStatus.textContent = 'Slots Found';
+                } else if (this.conversationContext.duration && this.conversationContext.preferred_time) {
+                    this.schedulingStatus.textContent = 'Checking Calendar...';
+                } else {
+                    this.schedulingStatus.textContent = 'Ready';
+                }
+            }
+            
+            switchTab(tabName) {
+                // Update tab buttons
+                document.querySelectorAll('.tab').forEach(tab => {
+                    tab.classList.remove('active');
+                });
+                document.querySelector(`.tab[onclick="scheduler.switchTab('${tabName}')"]`).classList.add('active');
+                
+                // Update views
+                document.querySelectorAll('.calendar-view').forEach(view => {
+                    view.classList.remove('active');
+                });
+                document.getElementById(`${tabName}View`).classList.add('active');
+                
+                // Reload meetings if switching to calendar view
+                if (tabName === 'calendar') {
+                    this.loadTodayMeetings();
+                }
+            }
+            
+            async loadTodayMeetings() {
+                try {
+                    const response = await fetch('/api/calendar/today');
+                    const data = await response.json();
+                    
+                    if (data.success) {
+                        this.updateMeetingsList(data.meetings);
+                    }
+                } catch (error) {
+                    console.error('Error loading meetings:', error);
+                }
+            }
+            
+            updateMeetingsList(meetings) {
+                const meetingsList = document.getElementById('meetingsList');
+                meetingsList.innerHTML = '';
+                
+                if (meetings.length === 0) {
+                    meetingsList.innerHTML = '<div class="meeting-item">No meetings scheduled for today</div>';
+                    return;
+                }
+                
+                meetings.forEach(meeting => {
+                    const startTime = new Date(meeting.start);
+                    const endTime = new Date(meeting.end);
+                    
+                    const formattedStartTime = startTime.toLocaleString('en-IN', {
+                        timeZone: 'Asia/Kolkata',
+                        hour: 'numeric',
+                        minute: 'numeric',
+                        hour12: true
+                    });
+                    
+                    const formattedEndTime = endTime.toLocaleString('en-IN', {
+                        timeZone: 'Asia/Kolkata',
+                        hour: 'numeric',
+                        minute: 'numeric',
+                        hour12: true
+                    });
+                    
+                    const duration = Math.round((endTime - startTime) / (1000 * 60));
+                    
+                    const item = document.createElement('div');
+                    item.className = 'meeting-item';
+                    item.innerHTML = `
+                        <div class="meeting-time">${formattedStartTime} - ${formattedEndTime}</div>
+                        <div class="meeting-title">${meeting.title}</div>
+                        <div class="meeting-duration">${duration} minutes</div>
+                    `;
+                    
+                    meetingsList.appendChild(item);
+                });
+            }
+        }
+        
+        function quickAction(action) {
+            const scheduler = window.scheduler;
+            scheduler.messageInput.value = action;
+            scheduler.sendMessage(action);
+        }
+        
+        window.addEventListener('DOMContentLoaded', () => {
+            window.scheduler = new SmartScheduler();
+        });
+    </script>
+</body>
+</html>

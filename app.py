@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 import asyncio
 import aiohttp
@@ -24,6 +24,7 @@ import base64
 import speech_recognition as sr
 from io import BytesIO
 import wave
+import concurrent.futures
 
 # Load environment variables from .env file
 load_dotenv()
@@ -65,7 +66,8 @@ class SmartSchedulerAgent:
             'title': None,
             'attendees': [],
             'current_step': 'initial',
-            'available_slots': []
+            'available_slots': [],
+            'conversation_history': []  # Add conversation history
         }
         
         # Initialize Gemini AI
@@ -417,13 +419,23 @@ class SmartSchedulerAgent:
     async def process_message(self, user_message: str) -> Dict:
         """Process user message and generate response asynchronously"""
         try:
+            # Add user message to conversation history
+            self.conversation_context['conversation_history'].append({
+                'role': 'user',
+                'content': user_message
+            })
+
             # Parse time information from the message
             parsed_info = await self.parse_time_with_ai(user_message)
             logger.info(f"Parsed info from message: {parsed_info}")
             
             if not parsed_info:
+                response_text = await self._generate_ai_response(
+                    "I couldn't understand the time information. Could you please rephrase your request?",
+                    user_message
+                )
                 return {
-                    'response': "I couldn't understand the time information. Could you please rephrase your request?",
+                    'response': response_text,
                     'context': self.conversation_context,
                     'has_slots': False
                 }
@@ -464,22 +476,35 @@ class SmartSchedulerAgent:
                     
                     # Generate response based on available slots
                     if available_slots:
+                        response_text = await self._generate_ai_response(
+                            "I found some available slots. Please choose your preferred time from the options displayed.",
+                            user_message,
+                            available_slots=available_slots
+                        )
                         response = {
-                            'response': "I found some available slots. Please choose your preferred time from the options displayed.",
+                            'response': response_text,
                             'context': self.conversation_context,
                             'has_slots': True,
                             'available_slots': available_slots
                         }
                     else:
+                        response_text = await self._generate_ai_response(
+                            "I couldn't find any available slots matching your criteria. Would you like to try a different time or day?",
+                            user_message
+                        )
                         response = {
-                            'response': "I couldn't find any available slots matching your criteria. Would you like to try a different time or day?",
+                            'response': response_text,
                             'context': self.conversation_context,
                             'has_slots': False
                         }
                 except Exception as e:
                     logger.error(f"Error checking calendar: {str(e)}", exc_info=True)
+                    response_text = await self._generate_ai_response(
+                        "I encountered an error while checking the calendar. Please try again.",
+                        user_message
+                    )
                     return {
-                        'response': "I encountered an error while checking the calendar. Please try again.",
+                        'response': response_text,
                         'context': self.conversation_context,
                         'has_slots': False
                     }
@@ -491,18 +516,32 @@ class SmartSchedulerAgent:
                 if not self.conversation_context.get('preferred_time') and not self.conversation_context.get('specific_date'):
                     missing_info.append("time preference")
                 
+                response_text = await self._generate_ai_response(
+                    f"To help you schedule a meeting, I need to know the {', '.join(missing_info)}. Could you please provide that information?",
+                    user_message
+                )
                 response = {
-                    'response': f"To help you schedule a meeting, I need to know the {', '.join(missing_info)}. Could you please provide that information?",
+                    'response': response_text,
                     'context': self.conversation_context,
                     'has_slots': False
                 }
+            
+            # Add AI response to conversation history
+            self.conversation_context['conversation_history'].append({
+                'role': 'assistant',
+                'content': response['response']
+            })
             
             return response
             
         except Exception as e:
             logger.error(f"Error processing message: {str(e)}", exc_info=True)
+            response_text = await self._generate_ai_response(
+                f"I'm sorry, I encountered an error: {str(e)}",
+                user_message
+            )
             return {
-                'response': f"I'm sorry, I encountered an error: {str(e)}",
+                'response': response_text,
                 'context': self.conversation_context,
                 'has_slots': False
             }
@@ -536,6 +575,9 @@ class SmartSchedulerAgent:
             logger.info("Using fallback time parsing (no AI model available)")
             return self._fallback_time_parsing(user_input)
         
+        # Get current date for reference
+        current_date = datetime.now()
+        
         # First try quick regex patterns for common cases
         quick_patterns = {
             r'morning': {'preferred_time': 'morning'},
@@ -546,11 +588,11 @@ class SmartSchedulerAgent:
             r'(\d+)\s*hrs?': lambda m: {'duration': f"{m.group(1)} hour{'s' if int(m.group(1)) > 1 else ''}"},
             r'(\d+)\s*minutes?': lambda m: {'duration': f"{m.group(1)} minutes"},
             r'(\d+)\s*mins?': lambda m: {'duration': f"{m.group(1)} minutes"},
-            r'tomorrow': {'specific_date': (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')},
-            r'next week': {'specific_date': (datetime.now() + timedelta(days=7)).strftime('%Y-%m-%d')},
+            r'tomorrow': {'specific_date': (current_date + timedelta(days=1)).strftime('%Y-%m-%d')},
+            r'next week': {'specific_date': (current_date + timedelta(days=7)).strftime('%Y-%m-%d')},
             r'next (\w+)': lambda m: self._parse_next_day(m.group(1)),
             r'this (\w+)': lambda m: self._parse_this_day(m.group(1)),
-            r'on (\w+)': lambda m: self._parse_next_day(m.group(1)),  # Add pattern for "on [day]"
+            r'on (\w+)': lambda m: self._parse_next_day(m.group(1)),
             r'asap': {'urgency': 'asap'},
             r'urgent': {'urgency': 'asap'},
             r'immediately': {'urgency': 'asap'},
@@ -569,65 +611,94 @@ class SmartSchedulerAgent:
                 else:
                     result.update(value)
         
-        # If we found all necessary information, return it
-        if result.get('duration') and (result.get('preferred_time') or result.get('specific_date')):
+        # Enhanced AI prompt for better date parsing
+        prompt = f"""
+        Parse this scheduling request and extract the key information:
+        "{user_input}"
+        
+        Current date is: {current_date.strftime('%Y-%m-%d')}
+        
+        Return a JSON object with these fields:
+        - duration: meeting duration (e.g., "30 minutes", "1 hour", "2 hours")
+        - preferred_time: general time preference (e.g., "morning", "afternoon", "evening")
+        - specific_date: specific date in YYYY-MM-DD format. For relative dates:
+          * "tomorrow" -> {current_date + timedelta(days=1)}
+          * "next [day]" -> next occurrence of that day from {current_date}
+          * "this [day]" -> this week's occurrence from {current_date}
+          * "next week" -> {current_date + timedelta(days=7)}
+        - urgency: how urgent (e.g., "asap", "flexible", "specific")
+        - meeting_type: type of meeting if mentioned
+        
+        Important rules:
+        1. Always use dates relative to {current_date.strftime('%Y-%m-%d')}
+        2. For "next [day]", calculate the next occurrence of that day from {current_date}
+        3. For "this [day]", calculate this week's occurrence from {current_date}
+        4. If no specific date is mentioned, don't include specific_date field
+        5. Only include fields that are clearly mentioned
+        6. Return valid JSON only
+        
+        Example responses (using current date {current_date.strftime('%Y-%m-%d')}):
+        - "Schedule a meeting tomorrow afternoon": {{"specific_date": "{(current_date + timedelta(days=1)).strftime('%Y-%m-%d')}", "preferred_time": "afternoon"}}
+        - "1 hour meeting next friday": {{"duration": "1 hour", "specific_date": "{self._get_next_weekday(current_date, 4).strftime('%Y-%m-%d')}"}}
+        - "30 min meeting this wednesday": {{"duration": "30 minutes", "specific_date": "{self._get_this_weekday(current_date, 2).strftime('%Y-%m-%d')}"}}
+        """
+        
+        try:
+            logger.info("Sending request to Gemini AI")
+            response = await asyncio.to_thread(self.model.generate_content, prompt)
+            logger.info(f"Raw AI response: {response.text}")
+            
+            # Clean the response text to ensure it's valid JSON
+            response_text = response.text.strip()
+            response_text = re.sub(r'^```json\s*', '', response_text)
+            response_text = re.sub(r'\s*```$', '', response_text)
+            
+            if not response_text.startswith('{'):
+                response_text = '{' + response_text
+            if not response_text.endswith('}'):
+                response_text = response_text + '}'
+            
+            response_text = re.sub(r',\s*}', '}', response_text)
+            
+            parsed_data = json.loads(response_text)
+            logger.info(f"Parsed AI response: {parsed_data}")
+            
+            # Convert day names to actual dates if needed
+            if parsed_data.get('specific_date'):
+                specific_date = parsed_data['specific_date']
+                if specific_date.lower() in ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']:
+                    parsed_data['specific_date'] = self._parse_next_day(specific_date.lower())['specific_date']
+                elif specific_date.startswith('next '):
+                    day_name = specific_date[5:].lower()
+                    parsed_data['specific_date'] = self._parse_next_day(day_name)['specific_date']
+                elif specific_date.startswith('this '):
+                    day_name = specific_date[5:].lower()
+                    parsed_data['specific_date'] = self._parse_this_day(day_name)['specific_date']
+            
+            # Combine AI results with quick pattern results
+            result.update(parsed_data)
             return result
-        
-        # If we have partial information, use AI to get the rest
-        if result:
-            prompt = f"""
-            Parse this scheduling request and extract the key information:
-            "{user_input}"
-            
-            Return a JSON object with these fields:
-            - duration: meeting duration (e.g., "30 minutes", "1 hour", "2 hours")
-            - preferred_time: general time preference (e.g., "morning", "afternoon", "evening")
-            - specific_date: specific date if mentioned (e.g., "2024-06-20", "tomorrow", "next friday")
-            - urgency: how urgent (e.g., "asap", "flexible", "specific")
-            - meeting_type: type of meeting if mentioned
-            
-            Only include fields that are clearly mentioned. Return valid JSON only.
-            """
-            
-            try:
-                logger.info("Sending request to Gemini AI")
-                response = await asyncio.to_thread(self.model.generate_content, prompt)
-                logger.info(f"Raw AI response: {response.text}")
-                
-                # Clean the response text to ensure it's valid JSON
-                response_text = response.text.strip()
-                response_text = re.sub(r'^```json\s*', '', response_text)
-                response_text = re.sub(r'\s*```$', '', response_text)
-                
-                if not response_text.startswith('{'):
-                    response_text = '{' + response_text
-                if not response_text.endswith('}'):
-                    response_text = response_text + '}'
-                
-                response_text = re.sub(r',\s*}', '}', response_text)
-                
-                parsed_data = json.loads(response_text)
-                logger.info(f"Parsed AI response: {parsed_data}")
-                
-                # Convert day names to actual dates if needed
-                if parsed_data.get('specific_date'):
-                    specific_date = parsed_data['specific_date']
-                    if specific_date.lower() in ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']:
-                        parsed_data['specific_date'] = self._parse_next_day(specific_date.lower())['specific_date']
-                
-                # Combine AI results with quick pattern results
-                result.update(parsed_data)
-                return result
-            except Exception as e:
-                logger.error(f"AI parsing failed: {str(e)}")
-                logger.info("Falling back to basic time parsing")
-                return self._fallback_time_parsing(user_input)
-        
-        # If no quick patterns matched, use AI
-        return self._fallback_time_parsing(user_input)
+        except Exception as e:
+            logger.error(f"AI parsing failed: {str(e)}")
+            logger.info("Falling back to basic time parsing")
+            return self._fallback_time_parsing(user_input)
+
+    def _get_next_weekday(self, current_date: datetime, target_weekday: int) -> datetime:
+        """Get the next occurrence of a weekday from the current date"""
+        days_ahead = target_weekday - current_date.weekday()
+        if days_ahead <= 0:
+            days_ahead += 7
+        return current_date + timedelta(days=days_ahead)
+
+    def _get_this_weekday(self, current_date: datetime, target_weekday: int) -> datetime:
+        """Get this week's occurrence of a weekday from the current date"""
+        days_ahead = target_weekday - current_date.weekday()
+        if days_ahead < 0:
+            days_ahead += 7
+        return current_date + timedelta(days=days_ahead)
 
     def _parse_next_day(self, day_name: str) -> Dict:
-        """Parse 'next [day]' or 'on [day]' expressions"""
+        """Parse 'next [day]' expressions"""
         days = {
             'monday': 0, 'tuesday': 1, 'wednesday': 2, 'thursday': 3,
             'friday': 4, 'saturday': 5, 'sunday': 6
@@ -637,16 +708,11 @@ class SmartSchedulerAgent:
         if day_name not in days:
             return {}
             
-        today = datetime.now()
+        current_date = datetime.now()
         target_day = days[day_name]
-        current_day = today.weekday()
         
-        # Calculate days until next occurrence
-        days_until = (target_day - current_day) % 7
-        if days_until == 0:  # If today is the target day, get next week
-            days_until = 7
-            
-        next_date = today + timedelta(days=days_until)
+        # Get next occurrence of the day
+        next_date = self._get_next_weekday(current_date, target_day)
         return {'specific_date': next_date.strftime('%Y-%m-%d')}
 
     def _parse_this_day(self, day_name: str) -> Dict:
@@ -660,13 +726,11 @@ class SmartSchedulerAgent:
         if day_name not in days:
             return {}
             
-        today = datetime.now()
+        current_date = datetime.now()
         target_day = days[day_name]
-        current_day = today.weekday()
         
-        # Calculate days until this week's occurrence
-        days_until = (target_day - current_day) % 7
-        this_date = today + timedelta(days=days_until)
+        # Get this week's occurrence of the day
+        this_date = self._get_this_weekday(current_date, target_day)
         return {'specific_date': this_date.strftime('%Y-%m-%d')}
 
     def _fallback_time_parsing(self, user_input: str) -> Dict:
@@ -730,6 +794,59 @@ class SmartSchedulerAgent:
         
         logger.info(f"Fallback parsing result: {result}")
         return result
+
+    async def _generate_ai_response(self, base_response: str, user_message: str, available_slots: List[Dict] = None) -> str:
+        """Generate a more natural AI response using conversation history"""
+        if not self.model:
+            return base_response
+
+        # Prepare conversation history for context
+        conversation_context = "\n".join([
+            f"{'User' if msg['role'] == 'user' else 'Assistant'}: {msg['content']}"
+            for msg in self.conversation_context['conversation_history'][-5:]  # Last 5 messages for context
+        ])
+
+        # Prepare slot information if available
+        slot_info = ""
+        if available_slots:
+            slot_info = "\nAvailable time slots:\n" + "\n".join([
+                f"- {slot['formatted']}"
+                for slot in available_slots[:5]  # Show first 5 slots
+            ])
+
+        prompt = f"""
+        You are a friendly and helpful AI scheduling assistant. You're having a conversation with a user about scheduling a meeting.
+        
+        Previous conversation:
+        {conversation_context}
+        
+        Current context:
+        - Duration: {self.conversation_context.get('duration', 'Not specified')}
+        - Preferred time: {self.conversation_context.get('preferred_time', 'Not specified')}
+        - Specific date: {self.conversation_context.get('specific_date', 'Not specified')}
+        - Meeting title: {self.conversation_context.get('title', 'Not specified')}
+        {slot_info}
+        
+        Base response: {base_response}
+        
+        Generate a natural, conversational response that:
+        1. Maintains context from the previous conversation
+        2. Sounds friendly and helpful
+        3. Includes relevant information from the current context
+        4. Keeps responses concise and natural
+        5. Avoids technical details and URLs
+        6. Uses natural language for time slots (e.g., "Here are some times that work" instead of listing raw data)
+        7. Focuses on the essential information the user needs to know
+        
+        Make the response sound like a natural conversation, not a technical report.
+        """
+
+        try:
+            response = await asyncio.to_thread(self.model.generate_content, prompt)
+            return response.text.strip()
+        except Exception as e:
+            logger.error(f"Error generating AI response: {str(e)}")
+            return base_response
 
 # Initialize the agent
 scheduler_agent = SmartSchedulerAgent()
@@ -838,7 +955,8 @@ async def reset_conversation():
             'title': None,
             'attendees': [],
             'current_step': 'initial',
-            'available_slots': []
+            'available_slots': [],
+            'conversation_history': []  # Reset conversation history
         }
         return JSONResponse({'success': True})
     except Exception as e:
@@ -850,50 +968,96 @@ async def reset_conversation():
 
 @app.post("/api/text-to-speech")
 async def text_to_speech(request: Request):
+    """Convert text to speech using Eleven Labs API with streaming"""
     try:
         data = await request.json()
-        text = data.get('text', '')
+        text = data.get('text', '').strip()
         
-        if not text or not scheduler_agent.elevenlabs_client:
-            return JSONResponse({
-                'success': False,
-                'error': "Text-to-speech not available"
-            })
-        
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"https://api.elevenlabs.io/v1/text-to-speech/{scheduler_agent.elevenlabs_voice_id}",
-                headers={
-                    "xi-api-key": scheduler_agent.eleven_labs_api_key,
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "text": text,
-                    "model_id": "eleven_monolingual_v1",
-                    "voice_settings": {
-                        "stability": 0.5,
-                        "similarity_boost": 0.5
-                    }
-                }
+        if not text:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "error": "No text provided"}
             )
             
-            if response.status_code == 200:
-                audio_b64 = base64.b64encode(response.content).decode('utf-8')
-                return JSONResponse({
-                    'success': True,
-                    'audio': audio_b64
-                })
-            else:
-                return JSONResponse({
-                    'success': False,
-                    'error': f"Eleven Labs API error: {response.status_code}"
-                })
+        if not scheduler_agent.elevenlabs_client:
+            return JSONResponse(
+                status_code=503,
+                content={"success": False, "error": "TTS service unavailable"}
+            )
+            
+        # Clean up text for speech
+        text = clean_text_for_speech(text)
+        
+        # Prepare the request to Eleven Labs API
+        url = f"https://api.elevenlabs.io/v1/text-to-speech/{scheduler_agent.elevenlabs_voice_id}"
+        headers = {
+            "xi-api-key": scheduler_agent.eleven_labs_api_key,
+            "accept": "audio/mpeg",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "text": text,
+            "model_id": "eleven_monolingual_v1",
+            "optimize_streaming_latency": 4,
+            "output_format": "mp3_44100_128",
+            "style": 0,
+            "use_speaker_boost": False,
+            "stability": 0.5,
+            "similarity_boost": 0.5
+        }
+        
+        # Use httpx for streaming
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, json=payload, headers=headers)
+            
+            if response.status_code != 200:
+                error_data = response.json()
+                raise Exception(f"Eleven Labs API error: {error_data.get('detail', 'Unknown error')}")
+            
+            # Return the audio data directly
+            return Response(
+                content=response.content,
+                media_type="audio/mpeg",
+                headers={
+                    "Content-Type": "audio/mpeg",
+                    "Content-Length": str(len(response.content))
+                }
+            )
+                
     except Exception as e:
-        logger.error(f"Error in text_to_speech endpoint: {str(e)}")
-        return JSONResponse({
-            'success': False,
-            'error': "Error generating speech"
-        })
+        logger.error(f"TTS error: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": str(e)}
+        )
+
+def clean_text_for_speech(text: str) -> str:
+    """Clean text to make it more natural for speech"""
+    # Remove URLs
+    text = re.sub(r'https?://\S+', '', text)
+    
+    # Remove redundant information
+    text = re.sub(r'You can view it here:', '', text)
+    text = re.sub(r'Meeting scheduled successfully!', 'Meeting scheduled!', text)
+    
+    # Clean up time slots presentation
+    if "Available time slots:" in text:
+        text = re.sub(r'Available time slots:.*?(?=\n\n|$)', 
+                     'Here are some available times:', text, flags=re.DOTALL)
+    
+    # Remove redundant formatting
+    text = re.sub(r'\n+', ' ', text)
+    text = re.sub(r'\s+', ' ', text)
+    
+    # Make it more conversational
+    text = text.replace('IST', '')
+    text = text.replace('UTC', '')
+    
+    # Clean up any remaining technical details
+    text = re.sub(r'\[.*?\]', '', text)
+    text = re.sub(r'\(.*?\)', '', text)
+    
+    return text.strip()
 
 @app.get("/api/calendar/today")
 async def get_today_meetings():
@@ -972,23 +1136,46 @@ async def recognize_speech(request: Request):
         # Create a BytesIO object from the audio data
         audio_io = BytesIO(audio_data)
         
-        # Initialize recognizer
+        # Initialize recognizer with optimized settings
         recognizer = sr.Recognizer()
+        recognizer.energy_threshold = 300  # Lower threshold for better recognition
+        recognizer.dynamic_energy_threshold = True
+        recognizer.pause_threshold = 0.5  # Shorter pause threshold
+        recognizer.phrase_threshold = 0.3  # Lower phrase threshold for faster response
+        recognizer.non_speaking_duration = 0.3  # Shorter non-speaking duration
         
         # Read the WAV file
         with wave.open(audio_io, 'rb') as wav_file:
             # Get audio data
             audio_data = wav_file.readframes(wav_file.getnframes())
             
-            # Create AudioData object
+            # Create AudioData object with optimized settings
             audio = sr.AudioData(
                 audio_data,
                 sample_rate=wav_file.getframerate(),
                 sample_width=wav_file.getsampwidth()
             )
             
-            # Recognize speech using Google's speech recognition
-            text = recognizer.recognize_google(audio)
+            # Process recognition and chat in parallel
+            async def process_recognition():
+                try:
+                    # Use a thread pool for parallel processing
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        # Start speech recognition in a separate thread
+                        future = executor.submit(
+                            recognizer.recognize_google,
+                            audio,
+                            language='en-US',
+                            show_all=False
+                        )
+                        return await asyncio.wrap_future(future)
+                except sr.UnknownValueError:
+                    raise HTTPException(status_code=400, detail="Could not understand audio")
+                except sr.RequestError as e:
+                    raise HTTPException(status_code=500, detail=f"Could not request results; {str(e)}")
+            
+            # Get recognition result
+            text = await process_recognition()
             
             # Process the recognized text through the chat endpoint
             response = await scheduler_agent.process_message(text)
@@ -999,15 +1186,10 @@ async def recognize_speech(request: Request):
                 'response': response
             })
             
-    except sr.UnknownValueError:
+    except HTTPException as e:
         return JSONResponse({
             'success': False,
-            'error': "Could not understand audio"
-        })
-    except sr.RequestError as e:
-        return JSONResponse({
-            'success': False,
-            'error': f"Could not request results; {str(e)}"
+            'error': str(e.detail)
         })
     except Exception as e:
         logger.error(f"Error in speech recognition: {str(e)}")

@@ -533,6 +533,9 @@
                 this.mediaRecorder = null;
                 this.audioChunks = [];
                 this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                this.recognition = null;
+                this.interimTranscript = '';
+                this.finalTranscript = '';
 
                 this.conversationContext = {
                     duration: null,
@@ -547,6 +550,7 @@
                 this.initializeScrollToBottom();
                 this.simulateConnection();
                 this.loadTodayMeetings();
+                this.initializeSpeechRecognition();
             }
             
             initializeElements() {
@@ -585,7 +589,8 @@
                     
                     this.mediaRecorder = new MediaRecorder(stream, {
                         mimeType: 'audio/webm;codecs=opus',
-                        audioBitsPerSecond: 16000
+                        audioBitsPerSecond: 16000,
+                        timeslice: 1000 // Process in 1-second chunks
                     });
                     
                     this.mediaRecorder.ondataavailable = (event) => {
@@ -599,25 +604,34 @@
                         this.audioChunks = [];
                         
                         try {
-                            // Convert to WAV format
-                            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                            // Convert to WAV format with optimized settings
+                            const audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                                sampleRate: 16000,
+                                latencyHint: 'interactive'
+                            });
+                            
                             const arrayBuffer = await audioBlob.arrayBuffer();
                             const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
                             
-                            // Create offline context for resampling
-                            const offlineContext = new OfflineAudioContext(1, audioBuffer.duration * 16000, 16000);
+                            // Create offline context for resampling with optimized settings
+                            const offlineContext = new OfflineAudioContext({
+                                numberOfChannels: 1,
+                                length: audioBuffer.duration * 16000,
+                                sampleRate: 16000
+                            });
+                            
                             const source = offlineContext.createBufferSource();
                             source.buffer = audioBuffer;
                             source.connect(offlineContext.destination);
                             source.start();
                             
-                            // Render at 16kHz
+                            // Render at 16kHz with optimized settings
                             const renderedBuffer = await offlineContext.startRendering();
                             
-                            // Convert to 16-bit PCM
+                            // Convert to 16-bit PCM with optimized settings
                             const pcmData = this._convertToPCM(renderedBuffer);
                             
-                            // Create WAV file
+                            // Create WAV file with optimized settings
                             const wavBlob = this._createWavFile(pcmData, 16000);
                             
                             // Send audio to server for recognition
@@ -628,10 +642,17 @@
                             this.voiceBtn.textContent = '⌛';
                             this.voiceBtn.disabled = true;
                             
+                            // Use AbortController for timeout
+                            const controller = new AbortController();
+                            const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+                            
                             const response = await fetch('/api/speech/recognize', {
                                 method: 'POST',
-                                body: formData
+                                body: formData,
+                                signal: controller.signal
                             });
+                            
+                            clearTimeout(timeoutId);
                             
                             // Reset button state
                             this.voiceBtn.textContent = '🎤';
@@ -667,6 +688,11 @@
                             this.voiceBtn.textContent = '🎤';
                             this.voiceBtn.disabled = false;
                             this.addMessage("Sorry, there was an error processing your speech. Please try again.", false);
+                        } finally {
+                            // Clean up audio context
+                            if (audioContext) {
+                                await audioContext.close();
+                            }
                         }
                     };
                 } catch (error) {
@@ -744,21 +770,16 @@
             }
             
             startRecording() {
-                if (this.mediaRecorder && !this.isRecording) {
-                    this.audioChunks = [];
-                    this.mediaRecorder.start();
+                if (this.recognition) {
+                    this.recognition.start();
                     this.isRecording = true;
-                    this.voiceBtn.classList.add('recording');
-                    this.voiceBtn.textContent = '🎤 Recording...';
                 }
             }
             
             stopRecording() {
-                if (this.mediaRecorder && this.isRecording) {
-                    this.mediaRecorder.stop();
+                if (this.recognition) {
+                    this.recognition.stop();
                     this.isRecording = false;
-                    this.voiceBtn.classList.remove('recording');
-                    this.voiceBtn.textContent = '🎤';
                 }
             }
             
@@ -811,7 +832,7 @@
             
             async speakText(text) {
                 const cleanText = text.replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ');
-                if (!cleanText) return; // Don't speak empty text
+                if (!cleanText) return;
 
                 try {
                     const response = await fetch('/api/text-to-speech', {
@@ -822,23 +843,38 @@
                         body: JSON.stringify({ text: cleanText })
                     });
 
-                    const data = await response.json();
-
-                    if (data.success && data.audio) {
-                        // Convert base64 to blob
-                        const audioBytes = Uint8Array.from(atob(data.audio), c => c.charCodeAt(0));
-                        const audioBlob = new Blob([audioBytes.buffer], { type: 'audio/mpeg' });
-                        const audioUrl = URL.createObjectURL(audioBlob);
-                        
-                        // Create and play audio
-                        const audio = new Audio(audioUrl);
-                        audio.onended = () => {
-                            URL.revokeObjectURL(audioUrl); // Clean up the URL
-                        };
-                        await audio.play();
-                    } else {
-                        console.error("Failed to get audio from Eleven Labs:", data.error || "Unknown error");
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
                     }
+
+                    // Create audio context with optimized settings
+                    const audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                        sampleRate: 44100,
+                        latencyHint: 'interactive'
+                    });
+
+                    // Get the audio data as a blob
+                    const audioBlob = await response.blob();
+                    const arrayBuffer = await audioBlob.arrayBuffer();
+                    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+
+                    // Create audio source
+                    const source = audioContext.createBufferSource();
+                    const gainNode = audioContext.createGain();
+                    gainNode.connect(audioContext.destination);
+                    source.connect(gainNode);
+                    source.buffer = audioBuffer;
+
+                    // Start playback
+                    source.start(0);
+
+                    // Clean up when done
+                    source.onended = () => {
+                        gainNode.disconnect();
+                        source.disconnect();
+                        audioContext.close();
+                    };
+
                 } catch (error) {
                     console.error('Error calling text-to-speech API:', error);
                 }
@@ -1105,6 +1141,88 @@
                     
                     meetingsList.appendChild(item);
                 });
+            }
+
+            initializeSpeechRecognition() {
+                if ('webkitSpeechRecognition' in window) {
+                    this.recognition = new webkitSpeechRecognition();
+                    this.recognition.continuous = true;
+                    this.recognition.interimResults = true;
+                    this.recognition.lang = 'en-US';
+
+                    this.recognition.onstart = () => {
+                        this.voiceBtn.classList.add('recording');
+                        this.voiceBtn.textContent = '🎤 Recording...';
+                        this.finalTranscript = ''; // Reset final transcript on start
+                    };
+
+                    this.recognition.onend = () => {
+                        this.voiceBtn.classList.remove('recording');
+                        this.voiceBtn.textContent = '🎤';
+                        if (this.finalTranscript) {
+                            this.sendMessage(this.finalTranscript);
+                            this.finalTranscript = '';
+                        }
+                    };
+
+                    this.recognition.onresult = (event) => {
+                        let interimTranscript = '';
+                        let finalTranscript = '';
+
+                        for (let i = event.resultIndex; i < event.results.length; i++) {
+                            const transcript = event.results[i][0].transcript;
+                            if (event.results[i].isFinal) {
+                                finalTranscript += transcript;
+                            } else {
+                                interimTranscript += transcript;
+                            }
+                        }
+
+                        // Update the UI with interim results
+                        if (interimTranscript) {
+                            this.addInterimMessage(interimTranscript);
+                        }
+
+                        // Store final transcript
+                        if (finalTranscript) {
+                            this.finalTranscript = finalTranscript;
+                            // Remove interim message when we get final transcript
+                            const existingInterim = document.querySelector('.message.interim');
+                            if (existingInterim) {
+                                existingInterim.remove();
+                            }
+                        }
+                    };
+
+                    this.recognition.onerror = (event) => {
+                        console.error('Speech recognition error:', event.error);
+                        this.voiceBtn.classList.remove('recording');
+                        this.voiceBtn.textContent = '🎤';
+                        // Remove interim message on error
+                        const existingInterim = document.querySelector('.message.interim');
+                        if (existingInterim) {
+                            existingInterim.remove();
+                        }
+                    };
+                }
+            }
+
+            addInterimMessage(text) {
+                // Remove any existing interim message
+                const existingInterim = document.querySelector('.message.interim');
+                if (existingInterim) {
+                    existingInterim.remove();
+                }
+
+                // Add new interim message
+                const messageDiv = document.createElement('div');
+                messageDiv.className = 'message user interim';
+                messageDiv.innerHTML = `
+                    <div class="message-avatar">👤</div>
+                    <div class="message-content">${text}</div>
+                `;
+                this.chatContainer.appendChild(messageDiv);
+                this.chatContainer.scrollTop = this.chatContainer.scrollHeight;
             }
         }
         

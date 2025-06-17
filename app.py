@@ -425,17 +425,83 @@ class SmartSchedulerAgent:
                 'content': user_message
             })
 
+            # Check if we have a selected slot from previous AI response
+            if 'selected_slot_index' in self.conversation_context:
+                slot_index = self.conversation_context['selected_slot_index']
+                del self.conversation_context['selected_slot_index']  # Clear the selection
+                
+                # Book the selected slot
+                try:
+                    slot = self.conversation_context['available_slots'][slot_index]
+                    event = {
+                        'summary': self.conversation_context.get('title', 'Meeting'),
+                        'start': {
+                            'dateTime': slot['start'],
+                            'timeZone': 'Asia/Kolkata',
+                        },
+                        'end': {
+                            'dateTime': slot['end'],
+                            'timeZone': 'Asia/Kolkata',
+                        },
+                        'attendees': [{'email': email} for email in self.conversation_context.get('attendees', [])],
+                    }
+                    
+                    # Create the request
+                    request = self.calendar_service.events().insert(
+                        calendarId='primary',
+                        body=event
+                    )
+                    
+                    # Execute the request in a thread
+                    event = await asyncio.to_thread(request.execute)
+                    
+                    logger.info(f"Created calendar event: {event.get('htmlLink')}")
+                    
+                    ai_response = await self._generate_ai_response(
+                        f"Great! I've scheduled your meeting for {slot['formatted']}. You can view it here: {event.get('htmlLink')}",
+                        user_message
+                    )
+                    
+                    # Reset conversation context after successful booking
+                    self.conversation_context = {
+                        'conversation_history': [],
+                        'duration': None,
+                        'preferred_time': None,
+                        'specific_date': None,
+                        'title': None,
+                        'attendees': [],
+                        'available_slots': [],
+                        'currentStep': 'initial'
+                    }
+                    
+                    return {
+                        'response': ai_response['response'],
+                        'context': self.conversation_context,
+                        'has_slots': False
+                    }
+                except Exception as e:
+                    logger.error(f"Error booking slot: {str(e)}", exc_info=True)
+                    ai_response = await self._generate_ai_response(
+                        "I'm sorry, I couldn't book that slot. Please try again.",
+                        user_message
+                    )
+                    return {
+                        'response': ai_response['response'],
+                        'context': self.conversation_context,
+                        'has_slots': False
+                    }
+
             # Parse time information from the message
             parsed_info = await self.parse_time_with_ai(user_message)
             logger.info(f"Parsed info from message: {parsed_info}")
             
             if not parsed_info:
-                response_text = await self._generate_ai_response(
+                ai_response = await self._generate_ai_response(
                     "I couldn't understand the time information. Could you please rephrase your request?",
                     user_message
                 )
                 return {
-                    'response': response_text,
+                    'response': ai_response['response'],
                     'context': self.conversation_context,
                     'has_slots': False
                 }
@@ -476,35 +542,90 @@ class SmartSchedulerAgent:
                     
                     # Generate response based on available slots
                     if available_slots:
-                        response_text = await self._generate_ai_response(
+                        ai_response = await self._generate_ai_response(
                             "I found some available slots. Please choose your preferred time from the options displayed.",
                             user_message,
                             available_slots=available_slots
                         )
+                        
+                        # If AI detected a booking intent, book the slot directly
+                        if ai_response['slot_index'] is not None:
+                            try:
+                                slot = available_slots[ai_response['slot_index']]
+                                event = {
+                                    'summary': self.conversation_context.get('title', 'Meeting'),
+                                    'start': {
+                                        'dateTime': slot['start'],
+                                        'timeZone': 'Asia/Kolkata',
+                                    },
+                                    'end': {
+                                        'dateTime': slot['end'],
+                                        'timeZone': 'Asia/Kolkata',
+                                    },
+                                    'attendees': [{'email': email} for email in self.conversation_context.get('attendees', [])],
+                                }
+                                
+                                # Create the request
+                                request = self.calendar_service.events().insert(
+                                    calendarId='primary',
+                                    body=event
+                                )
+                                
+                                # Execute the request in a thread
+                                event = await asyncio.to_thread(request.execute)
+                                
+                                logger.info(f"Created calendar event: {event.get('htmlLink')}")
+                                
+                                # Reset conversation context after successful booking
+                                self.conversation_context = {
+                                    'conversation_history': [],
+                                    'duration': None,
+                                    'preferred_time': None,
+                                    'specific_date': None,
+                                    'title': None,
+                                    'attendees': [],
+                                    'available_slots': [],
+                                    'currentStep': 'initial'
+                                }
+                                
+                                return {
+                                    'response': f"Great! I've scheduled your meeting for {slot['formatted']}. You can view it here: {event.get('htmlLink')}",
+                                    'context': self.conversation_context,
+                                    'has_slots': False
+                                }
+                            except Exception as e:
+                                logger.error(f"Error booking slot: {str(e)}", exc_info=True)
+                                return {
+                                    'response': "I'm sorry, I couldn't book that slot. Please try again.",
+                                    'context': self.conversation_context,
+                                    'has_slots': True,
+                                    'available_slots': available_slots
+                                }
+                        
                         response = {
-                            'response': response_text,
+                            'response': ai_response['response'],
                             'context': self.conversation_context,
                             'has_slots': True,
                             'available_slots': available_slots
                         }
                     else:
-                        response_text = await self._generate_ai_response(
+                        ai_response = await self._generate_ai_response(
                             "I couldn't find any available slots matching your criteria. Would you like to try a different time or day?",
                             user_message
                         )
                         response = {
-                            'response': response_text,
+                            'response': ai_response['response'],
                             'context': self.conversation_context,
                             'has_slots': False
                         }
                 except Exception as e:
                     logger.error(f"Error checking calendar: {str(e)}", exc_info=True)
-                    response_text = await self._generate_ai_response(
+                    ai_response = await self._generate_ai_response(
                         "I encountered an error while checking the calendar. Please try again.",
                         user_message
                     )
                     return {
-                        'response': response_text,
+                        'response': ai_response['response'],
                         'context': self.conversation_context,
                         'has_slots': False
                     }
@@ -516,12 +637,12 @@ class SmartSchedulerAgent:
                 if not self.conversation_context.get('preferred_time') and not self.conversation_context.get('specific_date'):
                     missing_info.append("time preference")
                 
-                response_text = await self._generate_ai_response(
+                ai_response = await self._generate_ai_response(
                     f"To help you schedule a meeting, I need to know the {', '.join(missing_info)}. Could you please provide that information?",
                     user_message
                 )
                 response = {
-                    'response': response_text,
+                    'response': ai_response['response'],
                     'context': self.conversation_context,
                     'has_slots': False
                 }
@@ -536,12 +657,12 @@ class SmartSchedulerAgent:
             
         except Exception as e:
             logger.error(f"Error processing message: {str(e)}", exc_info=True)
-            response_text = await self._generate_ai_response(
+            ai_response = await self._generate_ai_response(
                 f"I'm sorry, I encountered an error: {str(e)}",
                 user_message
             )
             return {
-                'response': response_text,
+                'response': ai_response['response'],
                 'context': self.conversation_context,
                 'has_slots': False
             }
@@ -795,10 +916,10 @@ class SmartSchedulerAgent:
         logger.info(f"Fallback parsing result: {result}")
         return result
 
-    async def _generate_ai_response(self, base_response: str, user_message: str, available_slots: List[Dict] = None) -> str:
+    async def _generate_ai_response(self, base_response: str, user_message: str, available_slots: List[Dict] = None) -> Dict:
         """Generate a more natural AI response using conversation history"""
         if not self.model:
-            return base_response
+            return {'response': base_response, 'slot_index': None}
 
         # Prepare conversation history for context
         conversation_context = "\n".join([
@@ -810,8 +931,8 @@ class SmartSchedulerAgent:
         slot_info = ""
         if available_slots:
             slot_info = "\nAvailable time slots:\n" + "\n".join([
-                f"- {slot['formatted']}"
-                for slot in available_slots[:5]  # Show first 5 slots
+                f"{i+1}. {slot['formatted']}"
+                for i, slot in enumerate(available_slots[:5])  # Show first 5 slots
             ])
 
         prompt = f"""
@@ -828,7 +949,6 @@ class SmartSchedulerAgent:
         {slot_info}
         
         Base response: {base_response}
-        
         Generate a natural, conversational response that:
         1. Maintains context from the previous conversation
         2. Sounds friendly and helpful
@@ -837,16 +957,44 @@ class SmartSchedulerAgent:
         5. Avoids technical details and URLs
         6. Uses natural language for time slots (e.g., "Here are some times that work" instead of listing raw data)
         7. Focuses on the essential information the user needs to know
+
+        
+        If the user's message indicates they want to book a specific slot (e.g., "book the first slot", "schedule for 2pm", "let's do the morning slot"), 
+        respond with a JSON object containing:
+        1. "response": A natural response confirming the booking
+        2. "slot_index": The index of the slot they want to book (0-based)
+        3. "slot_time": The time they mentioned (e.g., "11AM", "2pm", "morning")
+        
+        If the user's message doesn't indicate a specific booking intent, respond with just a natural conversational response.
         
         Make the response sound like a natural conversation, not a technical report.
         """
 
         try:
             response = await asyncio.to_thread(self.model.generate_content, prompt)
-            return response.text.strip()
+            response_text = response.text.strip()
+            
+            # Check if response is a JSON object with booking intent
+            try:
+                # Extract JSON from the response if it's embedded in text
+                json_match = re.search(r'```json\s*({.*?})\s*```', response_text, re.DOTALL)
+                if json_match:
+                    response_text = json_match.group(1)
+                
+                booking_data = json.loads(response_text)
+                if isinstance(booking_data, dict) and 'slot_index' in booking_data:
+                    return {
+                        'response': booking_data['response'],
+                        'slot_index': booking_data['slot_index'],
+                        'slot_time': booking_data.get('slot_time')
+                    }
+            except (json.JSONDecodeError, AttributeError):
+                pass
+                
+            return {'response': response_text, 'slot_index': None, 'slot_time': None}
         except Exception as e:
             logger.error(f"Error generating AI response: {str(e)}")
-            return base_response
+            return {'response': base_response, 'slot_index': None, 'slot_time': None}
 
 # Initialize the agent
 scheduler_agent = SmartSchedulerAgent()
@@ -885,7 +1033,9 @@ async def chat(request: Request):
             'response': response.get('response', "I'm sorry, I couldn't process that request."),
             'context': response.get('context', {}),
             'has_slots': response.get('has_slots', False),
-            'available_slots': response.get('available_slots', [])
+            'available_slots': response.get('available_slots', []),
+            'slot_index': response.get('slot_index'),
+            'slot_time': response.get('slot_time')
         })
     except Exception as e:
         logger.error(f"Error in chat endpoint: {str(e)}", exc_info=True)
@@ -901,6 +1051,11 @@ async def book_meeting(request: Request):
         slot_index = data.get('slot_index')
         title = data.get('title', 'Meeting')
         attendees = data.get('attendees', [])
+        
+        # If no slot_index in request data, check context
+        if slot_index is None and 'selected_slot_index' in scheduler_agent.conversation_context:
+            slot_index = scheduler_agent.conversation_context['selected_slot_index']
+            del scheduler_agent.conversation_context['selected_slot_index']  # Clear the selection
         
         if slot_index is None or not scheduler_agent.conversation_context.get('available_slots'):
             return JSONResponse({
@@ -935,9 +1090,21 @@ async def book_meeting(request: Request):
         
         logger.info(f"Created calendar event: {event.get('htmlLink')}")
         
+        # Reset conversation context after successful booking
+        scheduler_agent.conversation_context = {
+            'conversation_history': [],
+            'duration': None,
+            'preferred_time': None,
+            'specific_date': None,
+            'title': None,
+            'attendees': [],
+            'available_slots': [],
+            'currentStep': 'initial'
+        }
+        
         return JSONResponse({
             'success': True,
-            'message': f"Meeting scheduled successfully! You can view it here: {event.get('htmlLink')}"
+            'message': f"Great! I've scheduled your meeting for {slot['formatted']}. You can view it here: {event.get('htmlLink')}"
         })
     except Exception as e:
         logger.error(f"Error in book_meeting endpoint: {str(e)}")
@@ -968,7 +1135,7 @@ async def reset_conversation():
 
 @app.post("/api/text-to-speech")
 async def text_to_speech(request: Request):
-    """Convert text to speech using Eleven Labs API with streaming"""
+    """Convert text to speech using Eleven Labs API"""
     try:
         data = await request.json()
         text = data.get('text', '').strip()
@@ -987,6 +1154,7 @@ async def text_to_speech(request: Request):
             
         # Clean up text for speech
         text = clean_text_for_speech(text)
+        logger.info(f"Processing TTS request for text: {text[:50]}...")
         
         # Prepare the request to Eleven Labs API
         url = f"https://api.elevenlabs.io/v1/text-to-speech/{scheduler_agent.elevenlabs_voice_id}"
@@ -1006,21 +1174,34 @@ async def text_to_speech(request: Request):
             "similarity_boost": 0.5
         }
         
-        # Use httpx for streaming
+        logger.info(f"Making request to Eleven Labs API: {url}")
+        
+        # Use httpx for the request
         async with httpx.AsyncClient() as client:
             response = await client.post(url, json=payload, headers=headers)
             
             if response.status_code != 200:
                 error_data = response.json()
+                logger.error(f"Eleven Labs API error: {error_data}")
                 raise Exception(f"Eleven Labs API error: {error_data.get('detail', 'Unknown error')}")
             
-            # Return the audio data directly
+            logger.info(f"Received response from Eleven Labs API. Content length: {len(response.content)}")
+            
+            # Verify content type
+            content_type = response.headers.get('content-type', '')
+            if not content_type.startswith('audio/'):
+                logger.error(f"Unexpected content type: {content_type}")
+                raise Exception("Invalid audio format received from Eleven Labs API")
+            
+            # Return the audio data with proper headers
             return Response(
                 content=response.content,
-                media_type="audio/mpeg",
+                media_type=content_type,
                 headers={
-                    "Content-Type": "audio/mpeg",
-                    "Content-Length": str(len(response.content))
+                    "Content-Type": content_type,
+                    "Content-Length": str(len(response.content)),
+                    "Accept-Ranges": "bytes",
+                    "Cache-Control": "no-cache"
                 }
             )
                 

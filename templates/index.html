@@ -835,6 +835,15 @@
                 if (!cleanText) return;
 
                 try {
+                    console.log('Starting TTS request for:', cleanText);
+
+                    // Create audio context with optimized settings
+                    const audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                        sampleRate: 44100,
+                        latencyHint: 'interactive'
+                    });
+
+                    // Fetch the audio data
                     const response = await fetch('/api/text-to-speech', {
                         method: 'POST',
                         headers: {
@@ -847,36 +856,43 @@
                         throw new Error(`HTTP error! status: ${response.status}`);
                     }
 
-                    // Create audio context with optimized settings
-                    const audioContext = new (window.AudioContext || window.webkitAudioContext)({
-                        sampleRate: 44100,
-                        latencyHint: 'interactive'
-                    });
+                    console.log('Received audio response');
 
                     // Get the audio data as a blob
                     const audioBlob = await response.blob();
-                    const arrayBuffer = await audioBlob.arrayBuffer();
-                    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-
-                    // Create audio source
-                    const source = audioContext.createBufferSource();
-                    const gainNode = audioContext.createGain();
-                    gainNode.connect(audioContext.destination);
-                    source.connect(gainNode);
-                    source.buffer = audioBuffer;
-
-                    // Start playback
-                    source.start(0);
-
-                    // Clean up when done
-                    source.onended = () => {
-                        gainNode.disconnect();
-                        source.disconnect();
+                    
+                    // Create an audio element for playback
+                    const audio = new Audio();
+                    
+                    // Set up event listeners
+                    audio.onerror = (e) => {
+                        console.error('Audio playback error:', e);
+                    };
+                    
+                    audio.onended = () => {
+                        console.log('Audio playback completed');
                         audioContext.close();
                     };
+                    
+                    // Create object URL and set it as the audio source
+                    const audioUrl = URL.createObjectURL(audioBlob);
+                    audio.src = audioUrl;
+                    
+                    // Start playback
+                    try {
+                        await audio.play();
+                        console.log('Started audio playback');
+                    } catch (playError) {
+                        console.error('Error playing audio:', playError);
+                        throw playError;
+                    }
 
                 } catch (error) {
-                    console.error('Error calling text-to-speech API:', error);
+                    console.error('Error in TTS:', error);
+                    // Clean up any resources
+                    if (audioContext) {
+                        await audioContext.close();
+                    }
                 }
             }
             
@@ -910,10 +926,12 @@
                         this.conversationContext = data.context;
                         this.updateContext();
                         
-                        console.log('data.has_slots:', data.has_slots); // Log has_slots
-                        console.log('conversationContext.available_slots:', this.conversationContext.available_slots); // Log available_slots from context
-
-                        if (data.has_slots && this.conversationContext.available_slots && this.conversationContext.available_slots.length > 0) {
+                        // If AI detected a booking intent and returned a slot index
+                        if (data.slot_index !== undefined && data.slot_index !== null) {
+                            // Automatically book the slot
+                            await this.bookSlot(data.slot_index);
+                        } else if (data.has_slots && this.conversationContext.available_slots && this.conversationContext.available_slots.length > 0) {
+                            // If no booking intent but slots are available, show the slot buttons
                             this.addSlotSelectionButtons();
                         }
                     } else {

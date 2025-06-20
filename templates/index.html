@@ -949,8 +949,8 @@
                 slotsDiv.className = 'message bot';
                 
                 const slots = this.conversationContext.available_slots.map((slot, index) => {
-                    const startTime = new Date(slot.start);
-                    const endTime = new Date(slot.end);
+                    const startTime = new Date(slot.start_time);
+                    const endTime = new Date(slot.end_time);
                     
                     const formattedStartTime = startTime.toLocaleString('en-IN', {
                         timeZone: 'Asia/Kolkata',

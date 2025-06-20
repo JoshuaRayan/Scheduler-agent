@@ -2,6 +2,9 @@
 
 A smart meeting scheduling assistant that uses AI to understand natural language requests and manage your calendar. The application features voice input, text-to-speech responses, and intelligent calendar management.
 
+Check out the video here.
+https://www.loom.com/share/5dca2e517e744bdca5b7a43f540efc68?sid=5394df23-ab1d-48db-9aee-ee20f9b8e3d2
+
 ## Features
 
 - 🤖 AI-powered natural language processing for scheduling requests (LangGraph with Gemini)

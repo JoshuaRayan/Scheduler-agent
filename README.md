@@ -24,20 +24,15 @@ graph TD
     A["User/Browser"] -- "HTTP" --> B["Backend Entry Point: main.py (FastAPI App)"]
     B -- "Initializes" --> C["SmartSchedulerAgent: graph_agent.py"]
     B -- "Initializes" --> D["VoiceHandler: voice_handler.py"]
-
     C -- "Uses" --> E["CalendarTool: calendar_tool.py"]
     C -- "Uses" --> F["LLM Provider: llm_provider.py"]
-
     D -- "Deepgram API" --> G["Deepgram Service"]
     E -- "Google Calendar API" --> H["Google Calendar Service"]
-
     C -- "Reads Config" --> I["Configuration: config.py"]
     D -- "Reads Config" --> I
     E -- "Reads Config" --> I
     F -- "Reads Config" --> I
-
     B -- "Serves" --> J["Frontend: templates/index.html"]
-
     style A fill:#f9f,stroke:#333,stroke-width:2px
     style B fill:#fbb,stroke:#333,stroke-width:2px
     style C fill:#ddf,stroke:#333,stroke-width:2px

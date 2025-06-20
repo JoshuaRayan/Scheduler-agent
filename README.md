@@ -2,6 +2,9 @@
 
 A smart meeting scheduling assistant that uses AI to understand natural language requests and manage your calendar. The application features voice input, text-to-speech responses, and intelligent calendar management.
 
+Check out the video here.
+https://www.loom.com/share/5dca2e517e744bdca5b7a43f540efc68?sid=5394df23-ab1d-48db-9aee-ee20f9b8e3d2
+
 ## Features
 
 - 🤖 AI-powered natural language processing for scheduling requests (LangGraph with Gemini)
@@ -19,35 +22,7 @@ This project is organized to separate concerns, making it modular and easier to 
 Here's a high-level overview of the architecture:
 
 
-graph TD
-    flowchart LR
-    A["User/Browser"] -- "HTTP" --> B["Backend Entry Point: main.py (FastAPI App)"]
-    B -- "Initializes" --> C["SmartSchedulerAgent: graph_agent.py"]
-    B -- "Initializes" --> D["VoiceHandler: voice_handler.py"]
-
-    C -- "Uses" --> E["CalendarTool: calendar_tool.py"]
-    C -- "Uses" --> F["LLM Provider: llm_provider.py"]
-
-    D -- "Deepgram API" --> G["Deepgram Service"]
-    E -- "Google Calendar API" --> H["Google Calendar Service"]
-
-    C -- "Reads Config" --> I["Configuration: config.py"]
-    D -- "Reads Config" --> I
-    E -- "Reads Config" --> I
-    F -- "Reads Config" --> I
-
-    B -- "Serves" --> J["Frontend: templates/index.html"]
-
-    style A fill:#f9f,stroke:#333,stroke-width:2px
-    style B fill:#fbb,stroke:#333,stroke-width:2px
-    style C fill:#ddf,stroke:#333,stroke-width:2px
-    style D fill:#ffd,stroke:#333,stroke-width:2px
-    style E fill:#eef,stroke:#333,stroke-width:2px
-    style F fill:#cec,stroke:#333,stroke-width:2px
-    style G fill:#eee,stroke:#333,stroke-width:2px
-    style H fill:#eee,stroke:#333,stroke-width:2px
-    style I fill:#fef,stroke:#333,stroke-width:2px
-    style J fill:#bbf,stroke:#333,stroke-width:2px
+![Architecture Diagram](images/your-diagram.png)
 
 
 

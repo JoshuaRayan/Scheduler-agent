@@ -1,488 +1,249 @@
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
-import json
-import logging
-import asyncio
-from typing import Dict, Any
-import uvicorn
 import os
+import io
+import queue
 import re
-from google_auth_oauthlib.flow import Flow
-from googleapiclient.discovery import build
+import time
+import json
 
-from graph_agent import get_agent
-from voice_handler import get_voice_handler
-import config
+from dotenv import load_dotenv
 
-# OAuth 2.0 Configuration for Google Calendar
-# NOTE: These should ideally come from a secure configuration management or environment variables
-CLIENT_CONFIG = {
-    "web": {
-        "client_id": config.GOOGLE_CLIENT_ID,
-        "client_secret": config.GOOGLE_CLIENT_SECRET,
-        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-        "token_uri": "https://oauth2.googleapis.com/token",
-        "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-        "redirect_uris": ["http://localhost:5000/oauth2callback"],
-        "javascript_origins": ["http://localhost:5000"]
-    }
-}
-SCOPES = config.SCOPES
-REDIRECT_URI = "http://localhost:5000/oauth2callback" # Ensure this matches a redirect URI in your Google Cloud Console
+import pyaudio
+import pygame
+import speech_recognition as sr # For simple synchronous STT
+import httpx # For simple synchronous TTS
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+import google.generativeai as genai
 
-app = FastAPI(title="Smart Scheduler AI Agent")
+# Assuming llm_provider.py exists and provides get_llm
+from llm_provider import get_llm
+import config # To access DEEPGRAM_API_KEY
+import tools # Import the tools module for function calling
 
-# Setup templates
-templates = Jinja2Templates(directory="templates")
+load_dotenv()
 
-# Initialize agent and voice handler
-agent = get_agent()
-voice_handler = get_voice_handler()
+# --- API Keys and Clients ---
+DEEPGRAM_API_KEY = config.DEEPGRAM_API_KEY # Assuming DEEPGRAM_API_KEY is in config.py or .env
 
-# Store conversation contexts per session
-conversation_contexts: Dict[str, Dict[str, Any]] = {}
+# --- Audio Recording Parameters ---
+RATE = 16000
+CHUNK = int(RATE / 10)  # 100ms
 
-@app.get("/")
-async def index(request: Request):
-    """Serve the main HTML interface or initiate OAuth"""
-    token_path = 'token.json'
-    if not os.path.exists(token_path) or os.path.getsize(token_path) == 0:
-        logger.info("token.json not found or empty. Redirecting to OAuth.")
-        return RedirectResponse(url="/auth")
-    return templates.TemplateResponse("index.html", {"request": request})
+# Initialize audio playback (Pygame for playing TTS audio)
+# Pygame mixer needs to be initialized only once
+pygame.mixer.init()
 
-@app.get("/auth")
-async def auth_redirect():
-    """Initiate the Google OAuth2 flow"""
+# --- LLM Interaction Function ---
+def get_gemini_response(chat: genai.GenerativeModel.start_chat, prompt: str) -> str:
+    """
+    Gets a response from the Gemini LLM for a given prompt using a persistent chat session.
+    Handles potential function calls from the LLM.
+    
+    Args:
+        chat: The persistent Gemini chat object.
+        prompt: The text prompt to send to the LLM.
+        
+    Returns:
+        The LLM's text response, or a simplified error message.
+    """
     try:
-        flow = Flow.from_client_config(
-            CLIENT_CONFIG,
-            scopes=SCOPES,
-            redirect_uri=REDIRECT_URI
-        )
-        
-        authorization_url, state = flow.authorization_url(
-            access_type='offline',
-            include_granted_scopes='true',
-            prompt='select_account consent' # Force account selection and consent
-        )
-        
-        logger.info(f"Redirecting to authorization URL: {authorization_url}")
-        return RedirectResponse(authorization_url)
-    except Exception as e:
-        logger.error(f"Error in auth endpoint: {str(e)}")
-        return JSONResponse({
-            'success': False,
-            'error': f"Error starting authentication flow: {str(e)}"
-        })
-
-@app.get("/oauth2callback")
-async def oauth2callback(request: Request):
-    """Handle the OAuth2 callback from Google"""
-    try:
-        # Get the authorization code from the request
-        code = request.query_params.get('code')
-        if not code:
-            logger.error("No authorization code provided in callback.")
-            raise HTTPException(status_code=400, detail="No authorization code provided")
-        
-        # Create a new flow for this callback
-        flow = Flow.from_client_config(
-            CLIENT_CONFIG,
-            scopes=SCOPES,
-            redirect_uri=REDIRECT_URI
-        )
-        
-        # Exchange the code for credentials
-        flow.fetch_token(code=code)
-        credentials = flow.credentials
-        
-        # Save the credentials
-        token_path = 'token.json'
-        with open(token_path, 'w') as token_file:
-            token_file.write(credentials.to_json())
-        logger.info(f"Credentials saved successfully to {token_path}")
-        
-        # Attempt to re-authenticate the calendar tool now that token.json is available
-        agent.ensure_calendar_authenticated()
-        
-        # Redirect to the main page or a success page
-        return RedirectResponse(url="/")
-    except Exception as e:
-        logger.error(f"Error in oauth2callback: {str(e)}", exc_info=True)
-        # If there's an error, redirect back to auth to start fresh
-        return RedirectResponse(url="/auth")
-
-@app.post("/api/chat")
-async def chat(request: Request):
-    """Handle chat messages"""
-    try:
-        data = await request.json()
-        message = data.get('message', '')
-        session_id = data.get('session_id', 'default')
-        
-        logger.info(f"Received chat message: {message}")
-        
-        if not message:
-            return JSONResponse({
-                'success': False,
-                'error': "No message provided"
-            })
-        
-        # Get conversation history for this session
-        conversation_history = conversation_contexts.get(session_id, {}).get('history', [])
-        
-        # Check if a booking just occurred and the user is confirming it
-        current_context = conversation_contexts.get(session_id, {}).get('context', {})
-        user_input_lower = message.lower()
-        booking_confirmation_phrases = ['yes', 'sure', 'ok', 'book it', 'confirm']
-        
-        # Determine if user wants to book a specific slot (even if not explicitly confirmed yet)
-        explicit_slot_selection = None
-        slot_match = re.search(r'(?:option\s*|book\s*option\s*|book\s*)(\d+)', user_input_lower)
-        if slot_match:
-            try:
-                explicit_slot_selection = int(slot_match.group(1)) - 1 # Convert to 0-indexed
-                logger.info(f"Detected explicit slot selection: {explicit_slot_selection}")
-            except ValueError:
-                pass # Not a valid number
-
-        if (current_context.get('last_action') == 'meeting_booked' and
-            any(phrase in user_input_lower for phrase in booking_confirmation_phrases)):
-            logger.info(f"Skipping agent processing for confirmed booking message: {message}")
-            # Reset context here as well to ensure consistent state
-            conversation_contexts[session_id] = {
-                'context': {
-                    'step': 'initial',
-                    'duration': None,
-                    'preferred_time': None,
-                    'title': None,
-                    'available_slots': None,
-                    'last_action': None # Clear last_action after acknowledging
-                },
-                'history': []
+        response = chat.send_message(prompt,
+            generation_config={
+                "temperature": 0.7,
+                "max_output_tokens": 2048
             }
-            return JSONResponse({
-                'success': True,
-                'response': "Your meeting has been successfully booked.",
-                'context': conversation_contexts[session_id]['context'],
-                'has_slots': False,
-                'available_slots': [],
-                'slot_index': None,
-                'slot_time': None
-            })
-
-        # Process message with agent, passing the selected slot index if found
-        result = agent.process_message(message, conversation_history, selected_slot_index=explicit_slot_selection)
-        logger.info(f"Agent response: {result}")
-        
-        if not result or not result.get('success'):
-            return JSONResponse({
-                'success': False,
-                'error': result.get('error', "I'm sorry, I couldn't process that request.")
-            })
-        
-        # Update conversation context for this session
-        if session_id not in conversation_contexts:
-            conversation_contexts[session_id] = {}
-        
-        conversation_contexts[session_id]['context'] = result.get('conversation_context', {})
-        conversation_contexts[session_id]['history'] = result.get('conversation_history', conversation_history)
-        
-        # Check if we have available slots
-        available_slots = result.get('available_slots', [])
-        has_slots = result.get('has_slots', False)
-        
-        # Determine if user wants to book a specific slot (for frontend display)
-        slot_index_for_frontend = None
-        if has_slots and available_slots:
-            # Check if user input suggests booking a specific slot
-            user_input_lower = message.lower()
-            if any(word in user_input_lower for word in ['yes', 'sure', 'ok', 'book', 'confirm', 'first', 'second', 'third']):
-                # User wants to book - determine which slot
-                if 'first' in user_input_lower or '1' in user_input_lower:
-                    slot_index_for_frontend = 0
-                elif 'second' in user_input_lower or '2' in user_input_lower:
-                    slot_index_for_frontend = 1
-                elif 'third' in user_input_lower or '3' in user_input_lower:
-                    slot_index_for_frontend = 2
-                else:
-                    # Default to first slot
-                    slot_index_for_frontend = 0
-        
-        return JSONResponse({
-            'success': True,
-            'response': result.get('response', "I'm sorry, I couldn't process that request."),
-            'context': result.get('conversation_context', {}),
-            'has_slots': has_slots,
-            'available_slots': available_slots,
-            'slot_index': slot_index_for_frontend,
-            'slot_time': None  # Will be set when booking
-        })
-        
-    except Exception as e:
-        logger.error(f"Error in chat endpoint: {str(e)}", exc_info=True)
-        return JSONResponse({
-            'success': False,
-            'error': f"I'm sorry, I encountered an error: {str(e)}"
-        })
-
-@app.post("/api/book")
-async def book_meeting(request: Request):
-    """Book a meeting for a specific slot"""
-    try:
-        data = await request.json()
-        slot_index = data.get('slot_index')
-        title = data.get('title', 'Meeting')
-        attendees = data.get('attendees', [])
-        session_id = data.get('session_id', 'default')
-        
-        # Get conversation context for this session
-        context = conversation_contexts.get(session_id, {}).get('context', {})
-        available_slots = context.get('available_slots', [])
-        
-        if slot_index is None or slot_index >= len(available_slots):
-            return JSONResponse({
-                'success': False,
-                'error': "Invalid slot selection"
-            })
-        
-        slot = available_slots[slot_index]
-        
-        # Create meeting using the calendar tool
-        try:
-            result = agent.calendar_tool.invoke(
-                action="create_meeting",
-                start_time=slot["start_time"],
-                end_time=slot["end_time"],
-                title=title
-            )
-            
-            if isinstance(result, str):
-                try:
-                    result = json.loads(result)
-                except json.JSONDecodeError:
-                    result = {"error": f"Invalid response: {result}"}
-            
-            if result.get("success"):
-                # Reset conversation context after successful booking
-                conversation_contexts[session_id] = {
-                    'context': {
-                        'step': 'initial',
-                        'duration': None,
-                        'preferred_time': None,
-                        'title': None,
-                        'available_slots': None,
-                        'last_action': 'meeting_booked'
-                    },
-                    'history': []
-                }
-                
-                return JSONResponse({
-                    'success': True,
-                    'message': f"Perfect! I've successfully booked your meeting. {result.get('message', '')} You can view it at: {result.get('event_link', '')}"
-                })
-            else:
-                return JSONResponse({
-                    'success': False,
-                    'error': result.get('error', "I'm sorry, I couldn't book that slot. Please try again.")
-                })
-                
-        except Exception as e:
-            logger.error(f"Error creating meeting: {str(e)}")
-            return JSONResponse({
-                'success': False,
-                'error': f"Error creating meeting: {str(e)}"
-            })
-            
-    except Exception as e:
-        logger.error(f"Error in book_meeting endpoint: {str(e)}")
-        return JSONResponse({
-            'success': False,
-            'error': "I'm sorry, I couldn't book that slot. Please try again."
-        })
-
-@app.post("/api/reset")
-async def reset_conversation(request: Request):
-    """Reset conversation context"""
-    try:
-        data = await request.json()
-        session_id = data.get('session_id', 'default')
-        
-        conversation_contexts[session_id] = {
-            'context': {
-                'step': 'initial',
-                'duration': None,
-                'preferred_time': None,
-                'title': None,
-                'available_slots': None,
-                'last_action': None
-            },
-            'history': []
-        }
-        
-        return JSONResponse({'success': True})
-    except Exception as e:
-        logger.error(f"Error in reset_conversation endpoint: {str(e)}")
-        return JSONResponse({
-            'success': False,
-            'error': "Error resetting conversation"
-        })
-
-@app.post("/api/text-to-speech")
-async def text_to_speech(request: Request):
-    """Convert text to speech"""
-    try:
-        data = await request.json()
-        text = data.get('text', '').strip()
-        
-        if not text:
-            return JSONResponse(
-                status_code=400,
-                content={"success": False, "error": "No text provided"}
-            )
-        
-        # Use voice handler to synthesize speech
-        tts_data = await voice_handler.synthesize_speech_browser(text)
-        
-        if tts_data.get("type") == "tts_browser":
-            # Return browser TTS data
-            return JSONResponse({
-                "success": True,
-                "type": "tts_browser",
-                "text": text
-            })
-        elif tts_data.get("type") == "tts":
-            # Return the audio data
-            from fastapi.responses import Response
-            import base64
-            
-            audio_data = base64.b64decode(tts_data["audio"])
-            
-            return Response(
-                content=audio_data,
-                media_type=tts_data["format"],
-                headers={"Content-Disposition": "attachment; filename=speech.mulaw"}
-            )
-        else:
-            return JSONResponse(
-                status_code=503,
-                content={"success": False, "error": "TTS service unavailable"}
-            )
-        
-    except Exception as e:
-        logger.error(f"Error in text_to_speech endpoint: {str(e)}")
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "error": f"TTS error: {str(e)}"}
         )
-
-@app.post("/api/speech/recognize")
-async def recognize_speech(request: Request):
-    """Recognize speech from audio"""
-    try:
-        from fastapi import UploadFile, File
-        import base64
         
-        # Get the audio data from the request
-        form = await request.form()
-        audio_file = form.get('audio')
-        
-        if not audio_file:
-            return JSONResponse({
-                'success': False,
-                'error': "No audio file provided"
-            })
-        
-        # Read the audio data
-        audio_data = await audio_file.read()
-        
-        # Transcribe using voice handler
-        transcription = await voice_handler.transcribe_audio(audio_data, audio_file.content_type)
-        
-        if not transcription:
-            return JSONResponse({
-                'success': False,
-                'error': "Could not transcribe audio. Please try again."
-            })
-        
-        # Process the transcription with the agent
-        session_id = 'default'  # You might want to get this from the request
-        conversation_history = conversation_contexts.get(session_id, {}).get('history', [])
-        
-        result = agent.process_message(transcription, conversation_history)
-        
-        # Update conversation context
-        if session_id not in conversation_contexts:
-            conversation_contexts[session_id] = {}
-        
-        conversation_contexts[session_id]['context'] = result.get('conversation_context', {})
-        conversation_contexts[session_id]['history'] = result.get('conversation_history', conversation_history)
-        
-        return JSONResponse({
-            'success': True,
-            'text': transcription,
-            'response': result.get('response', ''),
-            'context': result.get('conversation_context', {}),
-            'has_slots': result.get('has_slots', False),
-            'available_slots': result.get('available_slots', [])
-        })
-        
-    except Exception as e:
-        logger.error(f"Error in speech recognition: {str(e)}")
-        return JSONResponse({
-            'success': False,
-            'error': f"Speech recognition error: {str(e)}"
-        })
-
-@app.get("/api/calendar/today")
-async def get_today_meetings():
-    """Get today's meetings"""
-    try:
-        if not agent.calendar_tool:
-            return JSONResponse({
-                'success': False,
-                'error': "Calendar service not available"
-            })
-        
-        # Get today's meetings using the calendar tool
-        result = agent.calendar_tool.invoke(action="get_today_meetings")
-        
-        if isinstance(result, str):
-            try:
-                result = json.loads(result)
-            except json.JSONDecodeError:
-                result = {"error": f"Invalid response: {result}"}
-        
-        if result.get("success"):
-            return JSONResponse({
-                'success': True,
-                'meetings': result.get('meetings', [])
-            })
-        else:
-            return JSONResponse({
-                'success': False,
-                'error': result.get('error', "Could not fetch today's meetings")
-            })
+        # Handle function calls if the LLM makes one
+        while True:
+            function_calls = []
+            for part in response.parts:
+                if part.function_call:
+                    function_calls.append(part.function_call)
             
+            if function_calls:
+                function_responses = []
+                for fc in function_calls:
+                    tool_function = getattr(tools, fc.name)
+                    args = {key: value for key, value in fc.args.items()}
+                    
+                    print(f"[DEBUG] Calling tool: {fc.name} with args: {args}")
+                    tool_output = tool_function(**args)
+                    print(f"[DEBUG] Tool output: {tool_output}")
+                    
+                    function_responses.append(
+                        genai.protos.Part(function_response=genai.protos.FunctionResponse(
+                            name=fc.name,
+                            response=tool_output
+                        ))
+                    )
+                
+                # Send all function responses back to the LLM in one go
+                response = chat.send_message(function_responses)
+
+            elif response.text:
+                return response.text.strip()
+            else:
+                return "I'm sorry, I couldn't generate a text response after tool execution."
+
     except Exception as e:
-        logger.error(f"Error getting today's meetings: {str(e)}")
-        return JSONResponse({
-            'success': False,
-            'error': f"Error fetching meetings: {str(e)}"
-        })
+        error_message = str(e)
+        print(f"An error occurred with the LLM or tool execution: {error_message}")
+        if "quota" in error_message.lower() or "429" in error_message:
+            return "My apologies, I've hit my usage limit. Please try again in a moment."
+        else:
+            return "I encountered an unexpected error with the AI. Please try again."
+
+# --- Speech-to-Text (STT) Function (Synchronous) ---
+def listen_for_speech_sync(device_index: int = 2) -> str:
+    """
+    Listens for speech from the microphone and transcribes it using Google Web Speech API (synchronously).
+    
+    Args:
+        device_index: The index of the input audio device to use.
+        
+    Returns:
+        The transcribed text, or an empty string if no speech is recognized.
+    """
+    recognizer = sr.Recognizer()
+    # Adjust for ambient noise for better accuracy
+    recognizer.energy_threshold = 3000  # Lower threshold for better sensitivity
+    recognizer.dynamic_energy_threshold = True
+    recognizer.pause_threshold = 0.8  # Slightly longer pause before considering the end of speech
+    recognizer.operation_timeout = 10  # Timeout for operations (max 10s for recognition)
+
+    print("\nListening for your input... (Speak now)")
+    with sr.Microphone(device_index=device_index, sample_rate=RATE) as source:
+        print("Adjusting for ambient noise, please wait...")
+        recognizer.adjust_for_ambient_noise(source, duration=1)
+        print("Microphone adjusted. Speak now.")
+        try:
+            # Listen for up to 5 seconds of speech, with a phrase limit of 10 seconds
+            audio = recognizer.listen(source, timeout=5, phrase_time_limit=10) 
+            print("Audio captured. Transcribing...")
+            
+            # Use Google Web Speech API for transcription
+            text = recognizer.recognize_google(audio)
+            print(f"User: {text}")
+            return text.strip()
+        except sr.WaitTimeoutError:
+            print("No speech detected after initial wait.")
+            return ""
+        except sr.UnknownValueError:
+            print("Could not understand audio.")
+            return ""
+        except sr.RequestError as e:
+            print(f"Could not request results from Google Web Speech API; {e}")
+            return ""
+        except Exception as e:
+            print(f"An unexpected error occurred during speech recognition: {e}")
+            return ""
+
+# --- Text-to-Speech (TTS) Function (Synchronous) ---
+def speak_text_sync(text: str):
+    """
+    Synthesizes speech using Deepgram TTS (synchronously) and plays it.
+    """
+    if not text or not text.strip(): # Ensure text is not empty or just whitespace
+        print("TTS: Received empty text, skipping speech synthesis.")
+        return
+
+    print(f"AI: {text}") # Print the text being spoken *before* the API call
+    url = "https://api.deepgram.com/v1/speak"
+    headers = {
+        "Authorization": f"Token {DEEPGRAM_API_KEY}",
+        "Content-Type": "application/json",
+        "Accept": "audio/mpeg", # Explicitly request MP3 audio for pygame
+    }
+    payload = {
+        "text": text,
+    }
+
+    try:
+        # Use httpx.post with json=payload for correct JSON serialization
+        response = httpx.post(url, headers=headers, json=payload, timeout=10.0) 
+        
+        if response.status_code == 200:
+            audio_data = response.content
+            
+            # Play audio using Pygame
+            audio_stream = io.BytesIO(audio_data)
+            audio_stream.seek(0)
+            
+            pygame.mixer.music.load(audio_stream, "mp3") # Load as MP3, Pygame can handle BytesIO
+            pygame.mixer.music.play()
+            while pygame.mixer.music.get_busy():
+                time.sleep(0.1) # Wait for playback to finish
+            pygame.mixer.music.stop() # Ensure it's stopped after playing
+
+        else:
+            error_text = response.text
+            print(f"Deepgram TTS API error: {response.status_code} - {error_text}")
+            # Raw Request Content Sent is not directly available from response.request.content in httpx for sync post
+            # if response.request and hasattr(response.request, 'content'):
+            #     print(f"Raw Request Content Sent: {response.request.content.decode('utf-8', errors='ignore')}")
+
+    except Exception as e:
+        print(f"Error in Deepgram TTS request/playback: {e}", flush=True)
+
+# --- Main Application Loop (Synchronous) ---
+def main():
+    print("🎙️ Start speaking. Say 'exit' to quit.\n")
+
+    # Initial check for Deepgram API key
+    if not DEEPGRAM_API_KEY:
+        print("Error: DEEPGRAM_API_KEY not found in config.py or environment variables.")
+        print("Please set it up before running the agent.")
+        return
+
+    print("AI agent ready! Speak to interact or press Ctrl+C to quit.")
+    
+    # Initialize LLM model and chat session once
+    try:
+        model = get_llm()
+        chat = model.start_chat(history=[])
+        print("Gemini LLM chat session initialized.")
+    except Exception as e:
+        print(f"Error initializing Gemini LLM: {e}")
+        print("Cannot proceed without a working LLM. Exiting.")
+        return
+
+    try:
+        while True:
+            # 1. Listen for speech (STT) synchronously
+            user_input = listen_for_speech_sync(device_index=2) 
+            
+            if not user_input:
+                print("Trying again...\n")
+                continue
+                
+            # user_input is already printed by listen_for_speech_sync
+            
+            # Check for exit command
+            if re.search(r"\b(exit|quit)\b", user_input, re.I):
+                speak_text_sync("Goodbye!")
+                print("👋 Exiting.")
+                break
+            
+            # 2. Get response from Gemini LLM (now handles tool calls internally)
+            print("AI Thinking...")
+            final_ai_response = get_gemini_response(chat, user_input) 
+            
+            # 3. Speak the AI's final response (TTS) synchronously
+            speak_text_sync(final_ai_response)
+            
+            time.sleep(1) # Small pause before next listening round
+            
+    except KeyboardInterrupt:
+        print("\n\nApplication terminated by user.")
+    except Exception as e:
+        print(f"\nAn unexpected error occurred: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        # Cleanup pygame mixer
+        if pygame.mixer.get_init():
+            pygame.mixer.quit()
+        print("\nThank you for using the AI agent. Goodbye!")
 
 if __name__ == "__main__":
-    uvicorn.run(
-        "main:app",
-        host=config.HOST,
-        port=config.PORT,
-        reload=True,
-        log_level="info"
-    ) 
+    main()

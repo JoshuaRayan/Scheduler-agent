@@ -75,12 +75,9 @@ class GoogleCalendarService:
 
         return build('calendar', 'v3', credentials=creds)
 
-    def get_busy_events_for_day(self, date_str: str) -> List[Tuple[datetime.datetime, datetime.datetime]]:
-        day_start_ist = IST.localize(datetime.datetime.fromisoformat(date_str + "T00:00:00"))
-        day_end_ist = IST.localize(datetime.datetime.fromisoformat(date_str + "T23:59:59"))
-
-        time_min = day_start_ist.astimezone(pytz.UTC).isoformat()
-        time_max = day_end_ist.astimezone(pytz.UTC).isoformat()
+    def get_busy_events_for_day(self, start_time: datetime.datetime, end_time: datetime.datetime) -> List[Tuple[datetime.datetime, datetime.datetime]]:
+        time_min = start_time.astimezone(pytz.UTC).isoformat()
+        time_max = end_time.astimezone(pytz.UTC).isoformat()
 
         events_result = self.service.events().list(
             calendarId='primary',
@@ -106,7 +103,7 @@ class GoogleCalendarService:
                 ))
         return busy_slots
 
-    def book_meeting(self, start_time: datetime.datetime, end_time: datetime.datetime, summary: str = "Meeting") -> str:
+    def book_meeting(self, start_time: datetime.datetime, end_time: datetime.datetime, summary: str = "Appointment", phone_number: str = None) -> str:
         event = {
             'summary': summary,
             'start': {
@@ -121,8 +118,33 @@ class GoogleCalendarService:
                 'useDefault': True,
             }
         }
+        if phone_number:
+            event['description'] = f"Phone Number: {phone_number}"
+
         created_event = self.service.events().insert(calendarId='primary', body=event).execute()
         return created_event.get('htmlLink', '')
+
+    def get_events_by_phone_number(self, phone_number: str) -> List[dict]:
+        # Search for events in a reasonable time range (e.g., 1 year in the past, 1 year in the future)
+        now = datetime.datetime.now(pytz.UTC)
+        time_min = (now - datetime.timedelta(days=365)).isoformat()
+        time_max = (now + datetime.timedelta(days=365)).isoformat()
+
+        events_result = self.service.events().list(
+            calendarId='primary',
+            timeMin=time_min,
+            timeMax=time_max,
+            singleEvents=True,
+            orderBy='startTime'
+        ).execute()
+        events = events_result.get('items', [])
+
+        matching_events = []
+        for event in events:
+            description = event.get('description', '')
+            if f"Phone Number: {phone_number}" in description:
+                matching_events.append(event)
+        return matching_events
 
 _calendar_service_instance = None
 
@@ -132,49 +154,45 @@ def get_calendar_service_instance():
         _calendar_service_instance = GoogleCalendarService()
     return _calendar_service_instance
 
-def get_busy_events_for_day(date: str) -> List[Tuple[datetime.datetime, datetime.datetime]]:
+def get_busy_events_for_day(start_time: datetime.datetime, end_time: datetime.datetime) -> List[Tuple[datetime.datetime, datetime.datetime]]:
     service_instance = get_calendar_service_instance()
-    return service_instance.get_busy_events_for_day(date)
+    return service_instance.get_busy_events_for_day(start_time, end_time)
 
-def find_free_slots(date: str, duration_minutes: int = 60) -> List[Tuple[datetime.datetime, datetime.datetime]]:
+def find_free_slots(start_time: datetime.datetime, end_time: datetime.datetime, duration_minutes: int = 60) -> List[Tuple[datetime.datetime, datetime.datetime]]:
     """
-    Find all available time slots for a meeting of the specified duration.
+    Find all available time slots for a meeting of the specified duration within a given time range.
     
     Args:
-        date: Date string in YYYY-MM-DD format
-        duration_minutes: Duration of the meeting in minutes
+        start_time: Start of the time range (datetime object in IST).
+        end_time: End of the time range (datetime object in IST).
+        duration_minutes: Duration of the meeting in minutes.
         
     Returns:
         List of (start_time, end_time) tuples in the local timezone (IST)
     """
-    busy_slots = get_busy_events_for_day(date)
+    busy_slots = get_busy_events_for_day(start_time, end_time)
     busy_slots.sort()
-    
-    # Convert work hours to datetime objects in IST
-    work_day_start = IST.localize(datetime.datetime.fromisoformat(f"{date}T{WORK_START_HOUR:02}:00:00"))
-    work_day_end = IST.localize(datetime.datetime.fromisoformat(f"{date}T{WORK_END_HOUR:02}:00:00"))
     
     # Calculate slot duration
     slot_duration = datetime.timedelta(minutes=duration_minutes)
     
     # Filter out slots that overlap with busy times
     free_slots = []
-    current_time = work_day_start
+    current_time = start_time
 
     for busy_start, busy_end in busy_slots:
-        # Add free slots before the current busy slot
-        while current_time + slot_duration <= busy_start:
-            if current_time + slot_duration <= work_day_end:
-                free_slots.append((current_time, current_time + slot_duration))
-            current_time += datetime.timedelta(minutes=30) # Move to next interval
+        # Add free slots before the current busy slot, within the requested range
+        while current_time + slot_duration <= busy_start and current_time + slot_duration <= end_time:
+            free_slots.append((current_time, current_time + slot_duration))
+            current_time += slot_duration # Move to next interval by slot_duration
         
         # Move current_time past the busy slot
         current_time = max(current_time, busy_end)
 
-    # Add free slots after the last busy slot until the end of the work day
-    while current_time + slot_duration <= work_day_end:
+    # Add free slots after the last busy slot until the end of the requested range
+    while current_time + slot_duration <= end_time:
         free_slots.append((current_time, current_time + slot_duration))
-        current_time += datetime.timedelta(minutes=30) # Move to next interval
+        current_time += slot_duration # Move to next interval by slot_duration
     
     # Remove duplicates and sort - this step is still necessary if intervals overlap or due to logic
     free_slots = sorted(list(set(free_slots)))
@@ -184,9 +202,71 @@ def find_free_slots(date: str, duration_minutes: int = 60) -> List[Tuple[datetim
 def format_slots(slots: List[Tuple[datetime.datetime, datetime.datetime]]) -> List[str]:
     return [f"{start.strftime('%I:%M %p')} - {end.strftime('%I:%M %p')}" for start, end in slots]
 
-def book_meeting(start_time: datetime.datetime, end_time: datetime.datetime, summary: str = "Meeting") -> str:
+def book_meeting(start_time: datetime.datetime, end_time: datetime.datetime, summary: str = "Appointment", phone_number: str = None) -> str:
     service_instance = get_calendar_service_instance()
-    return service_instance.book_meeting(start_time, end_time, summary)
+    return service_instance.book_meeting(start_time, end_time, summary, phone_number)
+
+def update_appointment(event_id: str, new_start_time: datetime.datetime, new_end_time: datetime.datetime, new_summary: str = "Appointment", phone_number: str = None) -> str:
+    service_instance = get_calendar_service_instance()
+
+    updated_event_body = {
+        'summary': new_summary,
+        'start': {
+            'dateTime': new_start_time.astimezone(pytz.UTC).isoformat(),
+            'timeZone': 'Asia/Kolkata'
+        },
+        'end': {
+            'dateTime': new_end_time.astimezone(pytz.UTC).isoformat(),
+            'timeZone': 'Asia/Kolkata'
+        },
+        'reminders': {
+            'useDefault': True,
+        }
+    }
+    if phone_number:
+        updated_event_body['description'] = f"Phone Number: {phone_number}"
+
+    try:
+        service_instance.service.events().update(
+            calendarId='primary',
+            eventId=event_id,
+            body=updated_event_body
+        ).execute()
+        return "Appointment updated successfully."
+    except Exception as e:
+        return f"Error updating appointment: {e}"
+
+def delete_appointment(phone_number: str, summary: str = None) -> str:
+    service_instance = get_calendar_service_instance()
+    matching_events = service_instance.get_events_by_phone_number(phone_number)
+
+    if not matching_events:
+        return "No appointments found for the given phone number."
+
+    # Filter by summary if provided
+    if summary:
+        lower_summary = summary.lower()
+        filtered_events = [event for event in matching_events if lower_summary in event.get('summary', '').lower()]
+    else:
+        filtered_events = matching_events
+
+    if not filtered_events:
+        return "No appointments found with that phone number and matching title."
+
+    deleted_count = 0
+    for event in filtered_events:
+        event_id = event['id']
+        try:
+            service_instance.service.events().delete(
+                calendarId='primary',
+                eventId=event_id
+            ).execute()
+            deleted_count += 1
+        except Exception as e:
+            print(f"Error deleting event {event_id}: {e}")
+            # Continue to next event if one fails
+
+    return f"Successfully deleted {deleted_count} appointment(s)."
 
 # --- LLM Interaction Function ---
 def get_gemini_response(chat: genai.GenerativeModel.start_chat, prompt: str) -> str:

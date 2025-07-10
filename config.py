@@ -16,7 +16,8 @@ SCOPES = [
 ]
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
-
+WORK_START_HOUR=8
+WORK_END_HOUR= 19
 # System Prompt for the AI Agent
 SYSTEM_PROMPT = """You are a Smart Scheduler AI Agent. Your primary goal is to assist users in managing their calendar.
     You have access to the following tools:
@@ -50,3 +51,10 @@ SYSTEM_PROMPT = """You are a Smart Scheduler AI Agent. Your primary goal is to a
 
     When providing available slots, present them clearly. When booking a meeting, confirm with the user and provide the event link if successful.
     """
+
+BLAND_AI_API_KEY = os.getenv("BLAND_AI_API_KEY")
+BLAND_AI_WEBHOOK_SECRET = os.getenv("BLAND_AI_WEBHOOK_SECRET")
+BLAND_AI_INBOUND_NUMBER=os.getenv("BLAND_AI_INBOUND_NUMBER")
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")

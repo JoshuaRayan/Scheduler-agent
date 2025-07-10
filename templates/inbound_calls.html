@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Active Inbound Bland AI Calls</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 0;
+            background: linear-gradient(135deg, #a1c4fd, #c2e9fb);
+            color: #333;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+        }
+
+        h1 {
+            color: #222;
+            margin-top: 40px;
+            font-size: 2.5em;
+            text-shadow: 1px 1px 2px rgba(0,0,0,0.1);
+        }
+
+        #active-calls-section {
+            background-color: rgba(255, 255, 255, 0.8);
+            border-radius: 15px;
+            padding: 30px;
+            margin: 20px 0;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.1);
+            backdrop-filter: blur(5px);
+            -webkit-backdrop-filter: blur(5px);
+            border: 1px solid rgba(200, 200, 200, 0.5);
+            width: 90%;
+            max-width: 800px; /* Wider for more calls */
+            text-align: center;
+        }
+
+        .call-item {
+            border: 1px solid #ccc;
+            padding: 15px;
+            margin-bottom: 15px;
+            border-radius: 8px;
+            text-align: left;
+            background-color: #fff;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+        }
+        .call-item h3 {
+            margin-top: 0;
+            color: #6a11cb;
+            font-size: 1.2em;
+            border-bottom: 1px solid #eee;
+            padding-bottom: 10px;
+            margin-bottom: 10px;
+        }
+        .call-item p {
+            margin: 5px 0;
+            font-size: 0.95em;
+        }
+        .call-item p strong {
+            color: #2575fc;
+        }
+        .transcript-area {
+            height: 200px; /* Taller transcript area */
+            overflow-y: auto;
+            border: 1px solid #eee;
+            padding: 10px;
+            background-color: #f9f9f9;
+            margin-top: 15px;
+            font-size: 0.9em;
+            color: #555;
+            border-radius: 5px;
+        }
+        .transcript-area p {
+            margin: 2px 0;
+            padding: 2px 0;
+            border-bottom: none;
+        }
+    </style>
+</head>
+<body>
+    <h1>Active Inbound Bland AI Calls</h1>
+
+    <div id="active-calls-section">
+        <div id="active-calls-container">
+            <p>Loading active calls...</p>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.0/socket.io.min.js"></script>
+    <script>
+        const activeCallTranscripts = {}; // Store transcript intervals for each active call
+
+        // Connect to Socket.IO for general messages (though not used for transcripts with polling)
+        const socket = io();
+
+        socket.on('connect', () => {
+            console.log('Connected to WebSocket');
+        });
+
+        // The 'transcript' event from the backend for webhooks is still here, but we are primarily polling.
+        // It's good to keep this as a fallback or for future use if webhook functionality is restored.
+        socket.on('transcript', (data) => {
+            console.log('Received webhook transcript:', data);
+            const callId = data.call_id;
+            if (callId) {
+                const transcriptContainer = document.getElementById(`transcript-${callId}`);
+                if (transcriptContainer) {
+                    const p = document.createElement('p');
+                    p.textContent = `${data.user}: ${data.text}`;
+                    transcriptContainer.appendChild(p);
+                    transcriptContainer.scrollTop = transcriptContainer.scrollHeight; // Scroll to bottom
+                }
+            }
+        });
+
+        socket.on('disconnect', () => {
+            console.log('Disconnected from WebSocket');
+        });
+
+        // Function to poll for a specific call's transcript
+        async function pollIndividualCallTranscript(callId) {
+            try {
+                const response = await fetch(`/bland-ai/transcript/${callId}`);
+                const result = await response.json();
+
+                if (response.ok && result) {
+                    const transcriptContainer = document.getElementById(`transcript-${callId}`);
+                    if (transcriptContainer) {
+                        transcriptContainer.innerHTML = ''; // Clear existing transcript to update
+                        if (result.transcripts && result.transcripts.length > 0) {
+                            result.transcripts.forEach(t => {
+                                const p = document.createElement('p');
+                                p.textContent = `${t.user}: ${t.text}`;
+                                transcriptContainer.appendChild(p);
+                            });
+                            transcriptContainer.scrollTop = transcriptContainer.scrollHeight; // Scroll to bottom
+                        }
+                    }
+
+                    // Check if the call is completed and stop polling for this specific call
+                    if (['completed', 'ended', 'failed', 'canceled'].includes(result.status)) {
+                        clearInterval(activeCallTranscripts[callId]);
+                        delete activeCallTranscripts[callId];
+                        console.log(`Polling stopped for call ${callId}: Call finished.`);
+                    }
+
+                } else {
+                    console.error(`Error fetching individual call data for ${callId}:`, result.error || JSON.stringify(result));
+                    // Optionally stop polling for this call on persistent error
+                    clearInterval(activeCallTranscripts[callId]);
+                    delete activeCallTranscripts[callId];
+                }
+            } catch (error) {
+                console.error(`Network error polling for call ${callId}:`, error);
+                clearInterval(activeCallTranscripts[callId]);
+                delete activeCallTranscripts[callId];
+            }
+        }
+
+        async function fetchActiveCalls() {
+            try {
+                const response = await fetch('/bland-ai/list_calls');
+                const data = await response.json();
+                const activeCallsContainer = document.getElementById('active-calls-container');
+
+                if (data.active_inbound_calls && data.active_inbound_calls.length > 0) {
+                    const currentCallIds = Array.from(activeCallsContainer.children).map(div => div.id.replace('call-', ''));
+
+                    // Remove calls that are no longer active first to avoid flickering
+                    currentCallIds.forEach(id => {
+                        const exists = data.active_inbound_calls.some(call => call.call_id === id);
+                        if (!exists) {
+                            const callToRemove = document.getElementById(`call-${id}`);
+                            if (callToRemove) {
+                                callToRemove.remove();
+                                if (activeCallTranscripts[id]) {
+                                    clearInterval(activeCallTranscripts[id]);
+                                    delete activeCallTranscripts[id];
+                                    console.log(`Stopped polling and removed completed/inactive call: ${id}`);
+                                }
+                            }
+                        }
+                    });
+
+                    // Add/update new and existing calls
+                    data.active_inbound_calls.forEach(call => {
+                        if (!currentCallIds.includes(call.call_id)) {
+                            // New call, add it to the UI
+                            const callDiv = document.createElement('div');
+                            callDiv.classList.add('call-item');
+                            callDiv.id = `call-${call.call_id}`;
+                            callDiv.innerHTML = `
+                                <h3>Call ID: ${call.call_id}</h3>
+                                <p>From: ${call.from_number}</p>
+                                <p>To: ${call.to_number}</p>
+                                <p>Status: <strong>${call.status}</strong></p>
+                                <p>Started: ${new Date(call.created_at).toLocaleString()}</p>
+                                <h4>Transcript:</h4>
+                                <div id="transcript-${call.call_id}" class="transcript-area"></div>
+                                <button class="end-call-button" data-twilio-call-sid="${call.twilio_call_sid ? call.twilio_call_sid : ''}" data-bland-ai-call-id="${call.call_id}">End Call with Message</button>
+                            `;
+                            activeCallsContainer.prepend(callDiv); // Add to the top
+
+                            // Start polling for this specific call's transcript
+                            activeCallTranscripts[call.call_id] = setInterval(() => pollIndividualCallTranscript(call.call_id), 1500);
+                            console.log(`Started polling for new inbound call: ${call.call_id}`);
+
+                            // Add event listener for the new button
+                            const endCallButton = callDiv.querySelector('.end-call-button');
+                            if (endCallButton) {
+                                endCallButton.addEventListener('click', async (event) => {
+                                    const twilioCallSid = event.target.dataset.twilioCallSid;
+                                    const blandAiCallId = event.target.dataset.blandAiCallId; // Get Bland AI call_id
+                                    const callItemDiv = event.target.closest('.call-item');
+
+                                    if (!twilioCallSid || twilioCallSid === "null") {
+                                        alert('Twilio Call SID not found or is invalid for this call. Cannot end the call via Twilio.');
+                                        event.target.disabled = false; // Re-enable button
+                                        if (callItemDiv) {
+                                            callItemDiv.querySelector('p strong').textContent = 'Error: No Twilio SID';
+                                        }
+                                        return;
+                                    }
+                                    
+                                    const customMessage = prompt('Enter message to play before ending the call:', 'we will issue a call back to your number soon.');
+                                    if (customMessage === null) { // User clicked cancel
+                                        return;
+                                    }
+
+                                    event.target.disabled = true; // Disable button to prevent multiple clicks
+                                    if (callItemDiv) {
+                                        callItemDiv.querySelector('p strong').textContent = 'Ending...';
+                                    }
+
+                                    try {
+                                        const response = await fetch('/bland-ai/redirect_and_end_call', {
+                                            method: 'POST',
+                                            headers: {
+                                                'Content-Type': 'application/json',
+                                            },
+                                            body: JSON.stringify({ twilio_call_sid: twilioCallSid, bland_ai_call_id: blandAiCallId, message: customMessage }),
+                                        });
+
+                                        const result = await response.json();
+                                        if (response.ok) {
+                                            alert(`Call ${twilioCallSid} ending initiated: ${result.message}`);
+                                            // The call will eventually be removed by the polling mechanism
+                                        } else {
+                                            alert(`Error ending call ${twilioCallSid}: ${result.error || JSON.stringify(result)}`);
+                                            event.target.disabled = false; // Re-enable on error
+                                            if (callItemDiv) {
+                                                callItemDiv.querySelector('p strong').textContent = 'Error Ending';
+                                            }
+                                        }
+                                    } catch (error) {
+                                        alert(`Network error ending call ${twilioCallSid}: ${error.message}`);
+                                        console.error('Network error ending call:', error);
+                                        event.target.disabled = false; // Re-enable on error
+                                        if (callItemDiv) {
+                                            callItemDiv.querySelector('p strong').textContent = 'Network Error';
+                                        }
+                                    }
+                                });
+                            }
+                        } else {
+                            // Existing call, just update its status
+                            const existingCallDiv = document.getElementById(`call-${call.call_id}`);
+                            if (existingCallDiv) {
+                                const statusElement = existingCallDiv.querySelector('p strong');
+                                if (statusElement) {
+                                    statusElement.textContent = call.status;
+                                }
+                            }
+                        }
+                    });
+
+                } else {
+                    activeCallsContainer.innerHTML = '<p>No active inbound calls.</p>';
+                }
+            } catch (error) {
+                console.error('Error fetching active calls:', error);
+                document.getElementById('active-calls-container').innerHTML = '<p>Error loading calls.</p>';
+            }
+        }
+
+        // Initial fetch and then every 5 seconds for active inbound calls
+        fetchActiveCalls();
+        setInterval(fetchActiveCalls, 5000); // Poll every 5 seconds for the list of calls
+    </script>
+</body>
+</html> 
